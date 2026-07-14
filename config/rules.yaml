@@ -1,0 +1,27 @@
+# 文件类型分类规则(Week 1:纯扩展名 + magic bytes,不涉及任何模型)
+# 结构:类别 -> { extensions: [...], magic_bytes: [...] }
+# magic_bytes 是文件开头的十六进制字节序列(大写,不带空格)
+#
+# 这只是起步的种子规则,等扫描完 Downloads 语料、看到分布之后再回来扩充。
+
+document:
+  extensions: [".pdf", ".doc", ".docx", ".txt", ".rtf", ".odt", ".md"]
+  magic_bytes:
+    - "25504446"    # %PDF
+
+image:
+  extensions: [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".heic"]
+  magic_bytes:
+    - "FFD8FF"      # JPEG
+    - "89504E47"    # PNG
+    - "47494638"    # GIF
+
+code:
+  extensions: [".py", ".js", ".ts", ".java", ".c", ".cpp", ".go", ".rs", ".sh", ".json", ".yaml", ".yml"]
+  magic_bytes: []
+
+archive:
+  extensions: [".zip", ".tar", ".gz", ".rar", ".7z"]
+  magic_bytes:
+    - "504B0304"    # ZIP
+    - "1F8B"        # GZIP
