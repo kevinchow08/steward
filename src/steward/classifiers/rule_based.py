@@ -22,6 +22,15 @@ def classify_file(file_path, rules):
     # 先看 magic bytes(读文件内容判断,更可靠)
     header_hex = _read_header_hex(file_path)
     category = _match_magic_bytes(header_hex, rules)
+
+    if category == "archive":
+        # zip 是个"容器"格式,docx/xlsx/pptx/odt 这些 Office/ODF 文档底层也是 zip,
+        # 跟真正的 zip 压缩包开头字节完全一样,magic bytes 在这里不可信,要靠扩展名再确认一次
+        ext_category = _match_extension(file_path, rules)
+        if ext_category is not None and ext_category != "archive":
+            return {"basic_type": ext_category, "matched_by": "extension_override"}
+        return {"basic_type": "archive", "matched_by": "magic_bytes"}
+
     if category is not None:
         return {"basic_type": category, "matched_by": "magic_bytes"}
 

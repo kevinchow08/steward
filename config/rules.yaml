@@ -5,9 +5,10 @@
 # 这只是起步的种子规则,等扫描完 Downloads 语料、看到分布之后再回来扩充。
 
 document:
-  extensions: [".pdf", ".doc", ".docx", ".txt", ".rtf", ".odt", ".md"]
+  extensions: [".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".rtf", ".odt", ".md", ".html"]
   magic_bytes:
     - "25504446"    # %PDF
+    - "D0CF11E0"    # OLE 复合文档格式(老版 .doc/.xls/.ppt)
 
 image:
   extensions: [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".heic"]
@@ -17,7 +18,7 @@ image:
     - "47494638"    # GIF
 
 code:
-  extensions: [".py", ".js", ".ts", ".java", ".c", ".cpp", ".go", ".rs", ".sh", ".json", ".yaml", ".yml"]
+  extensions: [".py", ".js", ".ts", ".java", ".c", ".cpp", ".go", ".rs", ".sh", ".json", ".yaml", ".yml", ".vue", ".scss", ".less"]
   magic_bytes: []
 
 archive:
@@ -25,3 +26,25 @@ archive:
   magic_bytes:
     - "504B0304"    # ZIP
     - "1F8B"        # GZIP
+
+# 可运行/可安装的程序包。.apk/.jar/.ipa 底层也是 zip 容器,跟 archive 有同样的 magic bytes 歧义,
+# 但 classify_file 里"magic bytes 判成 archive 时用扩展名二次确认"的逻辑是通用的,这里不用改代码
+executable:
+  extensions: [".exe", ".dll", ".apk", ".jar", ".ipa", ".msi", ".deb", ".dmg"]
+  magic_bytes:
+    - "4D5A"        # Windows PE(.exe/.dll)
+    - "7F454C46"    # Linux ELF
+    - "CFFAEDFE"    # macOS Mach-O(64位)
+    - "CEFAEDFE"    # macOS Mach-O(32位)
+
+media:
+  extensions: [".mp4", ".mov", ".avi", ".mkv", ".m4a", ".mp3", ".wav", ".flac"]
+  magic_bytes:
+    - "494433"      # MP3(ID3 标签)
+    - "52494646"    # RIFF 容器(.wav 用这个;.avi 其实也是 RIFF 容器、开头字节一样,
+                     # 但两者都归 media,撞了也不影响最终分类结果,不用像 archive 那样特殊处理)
+    - "664C6143"    # FLAC
+
+data:
+  extensions: [".csv", ".tsv", ".log", ".jsonl", ".xml"]
+  magic_bytes: []
