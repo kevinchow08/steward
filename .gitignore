@@ -1,6 +1,5 @@
-__pycache__/
-*.pyc
+models/
+output/
 .venv/
-venv/
-output/*
-!output/.gitkeep
+__pycache__/
+*.py[cod]

@@ -1,2 +1,7 @@
 pyyaml
 psutil
+pypdf
+python-docx
+beautifulsoup4
+numpy
+sentence-transformers
