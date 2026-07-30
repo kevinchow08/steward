@@ -10,14 +10,16 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR / "src"))
 
-from steward import monitor, report, scan  # noqa: E402(必须在 sys.path 改好之后才能 import,顺序不能换)
+from steward import indexing, monitor, report, scan  # noqa: E402(必须在 sys.path 改好之后才能 import,顺序不能换)
 from steward.classifiers import rule_based  # noqa: E402
+from steward.document_index import DEFAULT_DB_PATH  # noqa: E402
+from steward.embeddings import LocalEmbedder  # noqa: E402
 
 RULES_PATH = BASE_DIR / "config" / "rules.yaml"
 OUTPUT_DIR = BASE_DIR / "output"
 
 
-def main():
+def run_week1_scan(target_dir):
     # 创建解析器,此时它还不认识任何参数,只是个空壳
     parser = argparse.ArgumentParser(description="端侧文件类型分类(Week 1,纯规则)")
 
@@ -27,7 +29,7 @@ def main():
 
     # 真正读 sys.argv 并按上面登记的规则解析,返回一个 Namespace 对象
     # 之后用 args.target_dir 取值;缺参数/参数名打错/多传参数,这一步会自动报错退出
-    args = parser.parse_args()
+    args = parser.parse_args([target_dir])
 
     rules = rule_based.load_rules(RULES_PATH)
     res_monitor = monitor.ResourceMonitor()
@@ -55,6 +57,51 @@ def main():
     print(f"峰值内存: {stats['peak_rss_mb']:.1f} MB")
     print(f"峰值 CPU: {stats['peak_cpu_percent']:.1f}%")
     print(f"结果已写入 {OUTPUT_DIR}")
+
+
+def run_index(target_dir, db_path):
+    """加载本地模型并为目录建立 document 内容索引。"""
+
+    print("正在加载本地 embedding 模型，首次运行可能需要下载模型文件...")
+    embedder = LocalEmbedder()
+    stats = indexing.build_index(target_dir, embedder, db_path=db_path)
+
+    print(f"扫描文件: {stats['scanned_files']}")
+    print(f"已建立索引: {stats['indexed_files']}")
+    print(f"成功提取: {stats['success_files']}")
+    print(f"无文字内容: {stats['no_text_files']}")
+    print(f"提取失败: {stats['error_files']}")
+    print(f"暂不支持: {stats['unsupported_files']}")
+    print(f"文本片段: {stats['chunk_count']}")
+    print(f"索引耗时: {stats['elapsed_seconds']:.2f} 秒")
+    print(f"数据库: {db_path}")
+
+
+def main():
+    # 保留 Week 1 的旧用法：python main.py ~/Downloads
+    # 新功能使用子命令：python main.py index ~/Documents
+    if len(sys.argv) > 1 and sys.argv[1] not in {"index", "search", "-h", "--help"}:
+        run_week1_scan(sys.argv[1])
+        return
+
+    parser = argparse.ArgumentParser(description="端侧文件处理工具")
+    subparsers = parser.add_subparsers(dest="command")
+
+    index_parser = subparsers.add_parser("index", help="为目录建立 document 内容索引")
+    index_parser.add_argument("target_dir", help="要索引的目录，例如 ~/Documents")
+    index_parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"SQLite 数据库路径，默认是 {DEFAULT_DB_PATH}",
+    )
+
+    args = parser.parse_args()
+
+    if args.command == "index":
+        run_index(args.target_dir, args.db)
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":

@@ -135,6 +135,42 @@ SQLite 足够作为第一版产品化基础，且 Python 自带 `sqlite3`，不�
 | `embeddings` | `chunk_id`、`model_id`、`dimension`、`vector_blob` | 片段向量及其版本信息 |
 | `index_runs` | `id`、开始/结束时间、模型信息、统计 JSON | 每次运行的可追溯报告 |
 
+字段关系说明：
+
+- `documents.id`、`index_runs.id`、`extractions.id`、`chunks.id`、`embedding_models.id` 是各自表的主键（Primary Key），用于唯一标识一条记录。
+- `documents.last_seen_run_id` 是外键（Foreign Key），引用 `index_runs.id`，表示这个文件最近一次在哪个索引任务中被看见。
+- `extractions.document_id` 是外键，引用 `documents.id`；一个文件当前保留一份提取结果。
+- `chunks.extraction_id` 是外键，引用 `extractions.id`；一份提取结果可以有多个 chunk。
+- `embeddings.chunk_id` 是外键，引用 `chunks.id`；`embeddings.model_id` 是外键，引用 `embedding_models.id`。
+- `ON DELETE CASCADE` 只用于父子数据的清理：删除一份 extraction 时，属于它的 chunks 会自动删除；删除 chunk 时，属于它的 embeddings 会自动删除，避免留下无法关联的孤儿记录。
+
+当前表的约束与字段含义：
+
+| 表 | 字段 | 约束/含义 |
+| --- | --- | --- |
+| `index_runs` | `id` | 主键，自增 |
+| `index_runs` | `started_at` / `ended_at` | 本次索引任务的开始/结束时间 |
+| `index_runs` | `model_name` / `model_dimension` | 本次任务使用的 embedding 模型及向量维度 |
+| `index_runs` | `stats_json` | 本次任务的统计信息，保存为 JSON 文本 |
+| `documents` | `id` | 主键，自增 |
+| `documents` | `path` | 文件路径，唯一；当前用它识别文件 |
+| `documents` | `size_bytes` / `mtime_ns` | 文件大小与修改时间，用于后续判断是否变化 |
+| `documents` | `basic_type` | Week 1 的基础类型 |
+| `documents` | `is_present` | 最近一次扫描是否还看到这个文件，1/0 |
+| `documents` | `last_seen_run_id` | 外键，指向最近一次见到它的索引任务 |
+| `extractions` | `id` | 主键，自增 |
+| `extractions` | `document_id` | 外键，且唯一；指向所属文件 |
+| `extractions` | `status` / `error` | 提取成功、无文字、失败等状态与原因 |
+| `extractions` | `full_text` / `char_count` | 完整提取文本与字符数 |
+| `chunks` | `id` | 主键，自增 |
+| `chunks` | `extraction_id` | 外键，指向所属提取结果 |
+| `chunks` | `chunk_index` | 在该文件中的顺序编号 |
+| `chunks` | `text` / `start_offset` / `end_offset` | 片段内容及其在原文中的位置 |
+| `embedding_models` | `id` | 主键，自增 |
+| `embedding_models` | `model_name` / `dimension` / `normalized` | 模型身份、向量维度和归一化状态；组合唯一 |
+| `embeddings` | `chunk_id` / `model_id` | 复合主键，同时也是两个外键 |
+| `embeddings` | `dimension` / `vector` | 向量维度与 float32 二进制内容 |
+
 向量以 SQLite BLOB 保存；查询时加载当前模型对应的向量到内存并计算余弦相似度。第一版每次可全量重建，以获得最简单、可靠的结果。后续再依据 `path + size + mtime_ns` 复用未变化文件的文本和向量，避免过早实现增量更新复杂度。
 
 ### 5.6 建议的代码边界（尚未实现）
