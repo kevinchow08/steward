@@ -10,16 +10,15 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR / "src"))
 
-from steward import indexing, monitor, report, scan  # noqa: E402(必须在 sys.path 改好之后才能 import,顺序不能换)
-from steward.classifiers import rule_based  # noqa: E402
-from steward.document_index import DEFAULT_DB_PATH  # noqa: E402
-from steward.embeddings import LocalEmbedder  # noqa: E402
-
 RULES_PATH = BASE_DIR / "config" / "rules.yaml"
 OUTPUT_DIR = BASE_DIR / "output"
+DEFAULT_DB_PATH = OUTPUT_DIR / "steward.db"
 
 
 def run_week1_scan(target_dir):
+    from steward import monitor, report, scan
+    from steward.classifiers import rule_based
+
     # 创建解析器,此时它还不认识任何参数,只是个空壳
     parser = argparse.ArgumentParser(description="端侧文件类型分类(Week 1,纯规则)")
 
@@ -62,6 +61,9 @@ def run_week1_scan(target_dir):
 def run_index(target_dir, db_path):
     """加载本地模型并为目录建立 document 内容索引。"""
 
+    from steward import indexing
+    from steward.embeddings import LocalEmbedder
+
     print("正在加载本地 embedding 模型，首次运行可能需要下载模型文件...")
     embedder = LocalEmbedder()
     stats = indexing.build_index(target_dir, embedder, db_path=db_path)
@@ -75,6 +77,50 @@ def run_index(target_dir, db_path):
     print(f"文本片段: {stats['chunk_count']}")
     print(f"索引耗时: {stats['elapsed_seconds']:.2f} 秒")
     print(f"数据库: {db_path}")
+
+
+def run_search(query, db_path, top_k):
+    """加载本地模型，并在已有 document 索引中搜索，同时打印耗时与统计数据。"""
+
+    import time
+    from steward import semantic_search
+    from steward.embeddings import LocalEmbedder
+
+    total_start = time.monotonic()
+
+    # 1. 测量本地 Embedding 模型加载耗时
+    print("正在加载本地 embedding 模型...")
+    t_model_start = time.monotonic()
+    embedder = LocalEmbedder()
+    model_load_seconds = time.monotonic() - t_model_start
+
+    # 2. 执行语义搜索，接收结果和详细耗时/计数
+    results, stats = semantic_search.search_documents(
+        query,
+        embedder,
+        db_path=db_path,
+        top_k=top_k,
+    )
+
+    total_seconds = time.monotonic() - total_start
+
+    if not results:
+        print("没有找到结果。")
+    else:
+        for index, result in enumerate(results, start=1):
+            print(f"{index}. score={result.score:.4f}")
+            print(f"   文件: {result.path}")
+            print(f"   chunk: {result.chunk_index}")
+            print(f"   片段: {result.text}")
+
+    # 3. 打印性能与耗时监控信息
+    print("-" * 50)
+    print("【性能与耗时统计】")
+    print(f"扫描比较文件: {stats['document_count']} 个 | 比较片段(chunks): {stats['chunk_count']} 个")
+    print(f"模型加载耗时: {model_load_seconds:.3f} 秒")
+    print(f"Query 向量化: {stats['query_embed_seconds']:.3f} 秒")
+    print(f"向量对比计算: {stats['vector_search_seconds']:.3f} 秒")
+    print(f"搜索总耗时:   {total_seconds:.3f} 秒")
 
 
 def main():
@@ -96,10 +142,27 @@ def main():
         help=f"SQLite 数据库路径，默认是 {DEFAULT_DB_PATH}",
     )
 
+    search_parser = subparsers.add_parser("search", help="用自然语言搜索已建立索引的 document")
+    search_parser.add_argument("query", help="搜索问题，例如 '关于 agent 学习的对话'")
+    search_parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"SQLite 数据库路径，默认是 {DEFAULT_DB_PATH}",
+    )
+    search_parser.add_argument(
+        "--top-k",
+        type=int,
+        default=5,
+        help="返回结果数量，默认 5",
+    )
+
     args = parser.parse_args()
 
     if args.command == "index":
         run_index(args.target_dir, args.db)
+    elif args.command == "search":
+        run_search(args.query, args.db, args.top_k)
     else:
         parser.print_help()
 

@@ -44,7 +44,13 @@ class LocalEmbedder:
             cache_folder.mkdir(parents=True, exist_ok=True)
             model_kwargs["cache_folder"] = str(cache_folder)
 
-        self._model = SentenceTransformer(model_name, **model_kwargs)
+        # 优先使用本地已下载的缓存模型，避免重复联网检查以及 HF Hub 的未认证 Warning
+        try:
+            self._model = SentenceTransformer(model_name, local_files_only=True, **model_kwargs)
+        except Exception:
+            # 本地缓存不存在时，降级回在线下载模式
+            self._model = SentenceTransformer(model_name, **model_kwargs)
+
         self._model_name = model_name
         self._normalize_embeddings = normalize_embeddings
 

@@ -241,6 +241,49 @@ class DocumentIndex:
                     ),
                 )
 
+    def get_model_id(self, model_info):
+        """按模型信息查找已入库的模型记录。"""
+
+        row = self.connection.execute(
+            """
+            SELECT id FROM embedding_models
+            WHERE model_name = ? AND dimension = ? AND normalized = ?
+            """,
+            (
+                model_info.model_name,
+                model_info.dimension,
+                int(model_info.normalized),
+            ),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["id"]
+
+    def iter_search_vectors(self, model_id):
+        """读取指定模型生成的全部 chunk 向量和展示所需元数据。"""
+
+        cursor = self.connection.execute(
+            """
+            SELECT
+                d.id AS document_id,
+                d.path AS path,
+                c.id AS chunk_id,
+                c.chunk_index AS chunk_index,
+                c.text AS chunk_text,
+                e.dimension AS dimension,
+                e.vector AS vector
+            FROM embeddings e
+            JOIN chunks c ON c.id = e.chunk_id
+            JOIN extractions x ON x.id = c.extraction_id
+            JOIN documents d ON d.id = x.document_id
+            WHERE e.model_id = ?
+              AND d.is_present = 1
+              AND x.status = 'success'
+            """,
+            (model_id,),
+        )
+        yield from cursor
+
     def _get_or_create_model(self, model_info):
         """取得模型记录；同一模型配置只保存一条。"""
 
