@@ -123,10 +123,50 @@ def run_search(query, db_path, top_k):
     print(f"搜索总耗时:   {total_seconds:.3f} 秒")
 
 
+def run_classify(db_path):
+    """为已有索引文本的文档批量执行分类与打标签，并将结果持久化。"""
+
+    from steward import tagging
+
+    print("正在分析文档正文并生成结构化分类与标签...")
+    stats = tagging.build_classifications(db_path=db_path)
+
+    print("-" * 50)
+    print("【分类与打标签统计】")
+    print(f"已分析文档: {stats['total_documents']} 个")
+    print(f"成功归类文档: {stats['classified_count']} 个")
+    print(f"未归类 (unclassified 兜底): {stats['unclassified_count']} 个")
+    print(f"绑定标签总数: {stats['tag_bindings_count']} 个")
+    print(f"处理总耗时:   {stats['elapsed_seconds']:.3f} 秒")
+    print(f"数据库: {db_path}")
+
+
+def run_tags(db_path):
+    """展示 SQLite 中已分类文档的主分类、置信度及关联标签列表。"""
+
+    from steward.document_index import DocumentIndex
+
+    with DocumentIndex(db_path) as index:
+        records = list(index.iter_classifications())
+
+    if not records:
+        print("当前没有任何已分类打标的文档。请先运行: python main.py classify")
+        return
+
+    print(f"共查找到 {len(records)} 份已分类文档:\n")
+    for index, r in enumerate(records, start=1):
+        tags_str = ", ".join(r["tags"]) if r["tags"] else "(无标签)"
+        status_flag = "✅" if r["status"] == "classified" else "⚠️"
+        print(f"{index}. {status_flag} 分类: [{r['category']}] (置信度: {r['confidence']:.2f})")
+        print(f"   文件: {r['path']}")
+        print(f"   标签: {tags_str}")
+        print(f"   依据: {r['reasoning']}\n")
+
+
 def main():
     # 保留 Week 1 的旧用法：python main.py ~/Downloads
     # 新功能使用子命令：python main.py index ~/Documents
-    if len(sys.argv) > 1 and sys.argv[1] not in {"index", "search", "-h", "--help"}:
+    if len(sys.argv) > 1 and sys.argv[1] not in {"index", "search", "classify", "tags", "-h", "--help"}:
         run_week1_scan(sys.argv[1])
         return
 
@@ -157,12 +197,32 @@ def main():
         help="返回结果数量，默认 5",
     )
 
+    classify_parser = subparsers.add_parser("classify", help="对已有索引的 document 批量执行语义分类与打标签")
+    classify_parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"SQLite 数据库路径，默认是 {DEFAULT_DB_PATH}",
+    )
+
+    tags_parser = subparsers.add_parser("tags", help="展示数据库中已分类文档的主分类、置信度及标签列表")
+    tags_parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB_PATH,
+        help=f"SQLite 数据库路径，默认是 {DEFAULT_DB_PATH}",
+    )
+
     args = parser.parse_args()
 
     if args.command == "index":
         run_index(args.target_dir, args.db)
     elif args.command == "search":
         run_search(args.query, args.db, args.top_k)
+    elif args.command == "classify":
+        run_classify(args.db)
+    elif args.command == "tags":
+        run_tags(args.db)
     else:
         parser.print_help()
 
