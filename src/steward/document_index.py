@@ -107,6 +107,40 @@ class DocumentIndex:
                 FOREIGN KEY (chunk_id) REFERENCES chunks(id) ON DELETE CASCADE,
                 FOREIGN KEY (model_id) REFERENCES embedding_models(id) ON DELETE CASCADE
             );
+
+            /* Week 3 新增：分类与打标签引擎核心表结构 */
+            CREATE TABLE IF NOT EXISTS categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS document_classifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                document_id INTEGER NOT NULL UNIQUE,
+                category_id INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                status TEXT NOT NULL,
+                reasoning TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+                FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS document_tags (
+                document_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                confidence REAL NOT NULL,
+                PRIMARY KEY (document_id, tag_id),
+                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+            );
             """
         )
         self.connection.commit()
@@ -302,5 +336,155 @@ class DocumentIndex:
             WHERE model_name = ? AND dimension = ? AND normalized = ?
             """,
             (model_info.model_name, model_info.dimension, normalized),
+        ).fetchone()
+        return row["id"]
+
+    def save_classification(
+        self,
+        document_id,
+        category_name,
+        tags,
+        confidence,
+        status="classified",
+        reasoning="",
+    ):
+        """保存或更新文档的主分类与标签多对多关联。
+
+        如果在已有分类上重新打标，旧的关联标签会被清理替换。
+        """
+
+        category_id = self._get_or_create_category(category_name)
+        now_str = _utc_now()
+
+        # 防坑点 1：使用 with self.connection 开启 SQLite 原子事务！
+        # 在 __enter__ 时自动开启事务，如果在后续多步写入/清理中发生异常崩溃，
+        # __exit__ 会自动触发 rollback() 回滚所有删除与修改，防止产生数据半删半留的悬空状态；
+        # 若正常执行结束，会自动触发 commit() 提交修改。
+        with self.connection:
+            # 防坑点 2：使用 ON CONFLICT DO UPDATE (Upsert) 而非 INSERT OR REPLACE。
+            # INSERT OR REPLACE 的底层物理动作是先物理删除旧行再插入新行（会导致自增 ID 发生变动/抖动，破坏外键引用）。
+            # ON CONFLICT DO UPDATE 可以在保留原始主键 id 不变的前提下，在原位置做原地覆盖更新。
+            self.connection.execute(
+                """
+                INSERT INTO document_classifications
+                    (document_id, category_id, confidence, status, reasoning, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(document_id) DO UPDATE SET
+                    category_id = excluded.category_id,
+                    confidence = excluded.confidence,
+                    status = excluded.status,
+                    reasoning = excluded.reasoning,
+                    created_at = excluded.created_at
+                """,
+                (document_id, category_id, confidence, status, reasoning, now_str),
+            )
+
+            # 防坑点 3：多对多标签列表的“先删后加”策略。
+            # N:M 关联若直接 UPDATE，无法移除旧有但本次未传入的废弃标签（产生鬼魂数据）。
+            # 必须先显式清空该文档的所有旧关联标签，再重新批量绑定最新算出的标签。
+            self.connection.execute(
+                "DELETE FROM document_tags WHERE document_id = ?",
+                (document_id,),
+            )
+
+            # 批量绑定新的标签关联
+            for tag_name in tags:
+                tag_name = tag_name.strip()
+                if not tag_name:
+                    continue
+                tag_id = self._get_or_create_tag(tag_name)
+                self.connection.execute(
+                    """
+                    INSERT INTO document_tags (document_id, tag_id, confidence)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(document_id, tag_id) DO UPDATE SET
+                        confidence = excluded.confidence
+                    """,
+                    (document_id, tag_id, confidence),
+                )
+
+    def iter_classifications(self):
+        """读取所有文档的主分类、状态、置信度及标签列表。"""
+
+        cursor = self.connection.execute(
+            """
+            SELECT
+                d.id AS document_id,
+                d.path AS path,
+                d.basic_type AS basic_type,
+                c.name AS category_name,
+                dc.confidence AS confidence,
+                dc.status AS status,
+                dc.reasoning AS reasoning,
+                dc.created_at AS created_at
+            FROM documents d
+            JOIN document_classifications dc ON dc.document_id = d.id
+            JOIN categories c ON c.id = dc.category_id
+            WHERE d.is_present = 1
+            ORDER BY dc.created_at DESC
+            """
+        )
+
+        for row in cursor.fetchall():
+            doc_id = row["document_id"]
+            # 查出该文档绑定的所有标签名称
+            tag_rows = self.connection.execute(
+                """
+                SELECT t.name
+                FROM document_tags dt
+                JOIN tags t ON t.id = dt.tag_id
+                WHERE dt.document_id = ?
+                ORDER BY t.name ASC
+                """,
+                (doc_id,),
+            ).fetchall()
+
+            tags_list = [tr["name"] for tr in tag_rows]
+
+            yield {
+                "document_id": doc_id,
+                "path": row["path"],
+                "basic_type": row["basic_type"],
+                "category": row["category_name"],
+                "confidence": row["confidence"],
+                "status": row["status"],
+                "reasoning": row["reasoning"],
+                "tags": tags_list,
+                "created_at": row["created_at"],
+            }
+
+    def _get_or_create_category(self, category_name):
+        """获取或创建主分类记录，返回 category_id。"""
+
+        category_name = category_name.strip() or "unclassified"
+        now_str = _utc_now()
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO categories (name, created_at)
+            VALUES (?, ?)
+            """,
+            (category_name, now_str),
+        )
+        row = self.connection.execute(
+            "SELECT id FROM categories WHERE name = ?",
+            (category_name,),
+        ).fetchone()
+        return row["id"]
+
+    def _get_or_create_tag(self, tag_name):
+        """获取或创建标签字典记录，返回 tag_id。"""
+
+        tag_name = tag_name.strip()
+        now_str = _utc_now()
+        self.connection.execute(
+            """
+            INSERT OR IGNORE INTO tags (name, created_at)
+            VALUES (?, ?)
+            """,
+            (tag_name, now_str),
+        )
+        row = self.connection.execute(
+            "SELECT id FROM tags WHERE name = ?",
+            (tag_name,),
         ).fetchone()
         return row["id"]
