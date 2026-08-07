@@ -161,3 +161,36 @@ WHERE e.model_id = ?
 | `extractions` | `status`              | 过滤仅包含提取成功 (`success`) 的文档     |
 | `chunks`      | `chunk_index`, `text` | 匹配到的片段序号与原文字段（供 CLI 预览） |
 | `embeddings`  | `model_id`, `vector`  | 锁定模型 ID 并取出二进制向量用于点积计算  |
+
+---
+
+## 6. 文档级向量加权池化 (Document Vector Weighted Pooling)
+
+当一份长文档包含 $N$ 个切片 Chunk 向量 $(\vec{v}_1, \vec{v}_2, \dots, \vec{v}_N)$ 时，需要合成为代表整份文档全局语义的唯一 $1024$ 维向量 $\vec{V}_{\text{doc}}$。
+
+### 算力与几何步骤：
+1. **字符长度加权**：按切片文本字符长度 $w_i = \text{len}(c_i)$ 计算权重比例 $\alpha_i = \frac{w_i}{\sum w_j}$，长段落赋予更高比重。
+2. **沿轴降维 (`axis=0`)**：利用 `np.average(vectors, weights=..., axis=0)` 将 2D 矩阵 `(N, 1024)` 沿列方向加权压缩为 1D 向量 `(1024,)`。
+3. **L2 范数归一化**：将合成向量除以其模长 `norm = np.linalg.norm(doc_vec)`，重新拉伸为单位球面向量 ($\|\vec{V}_{\text{doc}}\| = 1.0$)，为后续高维余弦点积打下基础。
+4. **`float32` 强转**：调用 `.astype(np.float32)` 将计算过程中产生的 `float64` 还原为单精度 32 位浮点数，节省 50% 内存空间。
+
+```python
+# 核心 Pooling 实现范式
+def compute_document_vector(chunk_vectors, chunk_lengths):
+    vectors = np.array(chunk_vectors, dtype=np.float32)  # (N, 1024) 2D 矩阵
+    weights = np.array(chunk_lengths, dtype=np.float32)  # (N,) 1D 权重
+    
+    total_weight = np.sum(weights)
+    if total_weight > 0:
+        normalized_weights = weights / total_weight
+    else:
+        # 防御性容错：异常空数据时自动退回均匀平均
+        normalized_weights = np.ones(len(weights), dtype=np.float32) / len(weights)
+        
+    doc_vec = np.average(vectors, weights=normalized_weights, axis=0)
+    norm = np.linalg.norm(doc_vec)
+    if norm > 0:
+        doc_vec = doc_vec / norm
+        
+    return doc_vec.astype(np.float32)
+```
