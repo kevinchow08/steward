@@ -43,15 +43,28 @@ class LocalHttpClusterLLM(BaseClusterLLM):
         )
         self.model_name = model_name
 
-    def generate_cluster_metadata(self, representative_texts: List[str]) -> ClusterMetadata:
+    def generate_cluster_metadata(
+        self,
+        representative_texts: List[str],
+        existing_categories: List[str] = None,
+    ) -> ClusterMetadata:
         docs_summary = "\n".join([f"- 文件 {i+1} 内容片段: {text[:250]}" for i, text in enumerate(representative_texts)])
+
+        existing_info = ""
+        if existing_categories:
+            cat_list_str = "、".join(set(existing_categories))
+            existing_info = f"\n当前已创建的主分类池：[{cat_list_str}]。请优先评估是否可以归入已有主分类；若语义匹配，请直接复用已有名称；仅当确属全新领域时才允许新建名称。\n"
 
         prompt = (
             "你是一个专业的端侧文件整理 Agent。以下是一组属于同一个主题的代表性文件内容片段：\n\n"
             f"{docs_summary}\n\n"
-            "请分析它们的共同核心语义主题，并严格输出如下格式的纯 JSON，绝对不要包含任何 Markdown 标记或多余解释：\n"
+            f"{existing_info}\n"
+            "分类约束说明：\n"
+            "1. category 必须是高度抽象的顶级宏观分类 (2-4个字，如: 财务报销 / 招聘简历 / 技术代码 / 会议总结 / 证件合同)。\n"
+            "2. 严禁把具体细节词 (如: 打车、餐饮、发票、Python) 填入 category！所有具体细节词必须全部归入 tag_pool。\n\n"
+            "请严格输出如下格式的纯 JSON，绝对不要包含任何 Markdown 标记或多余解释：\n"
             "{\n"
-            '  "category": "极简的主分类名称(2-4个字，如: 财务报销 / 招聘简历 / 技术代码)",\n'
+            '  "category": "极简的高层主分类名称",\n'
             '  "tag_pool": ["提取5-8个最核心的细粒度候选关键词标签"]\n'
             "}"
         )
@@ -138,6 +151,7 @@ def analyze_clusters_metadata(
         llm = LocalHttpClusterLLM(base_url="http://localhost:8080/v1")
 
     cluster_metadata_map = {}
+    known_categories: List[str] = []
 
     for c in clusters:
         # 1. 从代表性文档中读取正文片段
@@ -155,8 +169,11 @@ def analyze_clusters_metadata(
         if not rep_texts:
             rep_texts = ["空文档"]
 
-        # 2. 调用 SLM 生成该簇的 Category 与 Tag Pool
-        meta = llm.generate_cluster_metadata(rep_texts)
+        # 2. 调用 SLM 生成该簇的 Category 与 Tag Pool (传入已有的主分类上下文，保证收敛)
+        meta = llm.generate_cluster_metadata(rep_texts, existing_categories=known_categories)
+        if meta and meta.category and meta.category != "未分类":
+            known_categories.append(meta.category)
+
         cluster_metadata_map[c.cluster_id] = meta
 
     return cluster_metadata_map
