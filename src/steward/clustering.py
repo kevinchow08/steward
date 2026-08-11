@@ -52,9 +52,14 @@ def cluster_document_vectors(
         min_samples=min_samples,
         metric=metric,
     )
+    # labels 是一个 Shape 为 (N,) 的 1D int64 NumPy 数组，例如 array([0, 0, 1, 2, -1, 0, ...])
+    # 数组第 i 个位置的值即为 matrix_2d 第 i 行文档所属的簇 ID (-1 代表噪声 Outlier)
     labels = clusterer.fit_predict(matrix_2d)
 
-    # 3. 按聚类 label 进行分组 (-1 为 Outliers)
+    # 3. 按聚类 label 进行分组
+    # 注意：因为 matrix_2d 是严格按照 doc_ids 的下标顺序 0..N-1 建立的，
+    # 所以 matrix_2d 的第 i 行就是 doc_ids[i]，其聚类结果就是 labels[i]。
+    # 使用 zip(doc_ids, labels) 可以 100% 物理保证 did 与 label 的位置严格对齐！
     cluster_groups: Dict[int, List[int]] = {}
     outliers: List[int] = []
 

@@ -47,47 +47,53 @@ def compute_document_vector(
     return doc_vec.astype(np.float32)
 
 
-def get_all_document_vectors(db_path=DEFAULT_DB_PATH) -> Dict[int, np.ndarray]:
-    """从 SQLite 中加载已索引文档的所有 Chunk 向量并批量合成为文档向量。
+def get_all_document_vectors(index=None, db_path: Path = DEFAULT_DB_PATH, model_id: int = 1) -> Dict[int, np.ndarray]:
+    """从数据库检索所有成功提取文本的文档及其切片向量，并通过 Pooling 算出一一对应的文档向量。
 
-    :return: 字典 {document_id: document_vector}
+    :param index: DocumentIndex 实例 (如果已在 Context 中，直接复用连接)
+    :param db_path: SQLite 数据库文件路径 (当 index 为 None 时使用)
+    :param model_id: Embedding 模型 ID (默认 1，代表 bge-m3)
+    :return: 字典 {document_id: (1024,) float32 np.ndarray}
+    """
+    if index is not None:
+        return _query_and_compute_vectors(index.connection, model_id)
+
+    with DocumentIndex(db_path) as idx:
+        return _query_and_compute_vectors(idx.connection, model_id)
+
+
+def _query_and_compute_vectors(connection, model_id: int) -> Dict[int, np.ndarray]:
+    """内部 Query 执行与加权 Pooling。"""
+    query = """
+        SELECT
+            x.document_id AS doc_id,
+            c.id AS chunk_id,
+            LENGTH(c.text) AS char_len,
+            e.vector AS vector_blob
+        FROM chunks c
+        JOIN extractions x ON x.id = c.extraction_id
+        JOIN embeddings e ON e.chunk_id = c.id
+        JOIN documents d ON d.id = x.document_id
+        WHERE e.model_id = ? AND x.status = 'success'
+        ORDER BY x.document_id, c.chunk_index
     """
 
-    with DocumentIndex(db_path) as index:
-        # 一次性关联查询：取 document_id, chunk_id, 文本长度, 向量 BLOB
-        cursor = index.connection.execute(
-            """
-            SELECT
-                x.document_id AS doc_id,
-                c.id AS chunk_id,
-                LENGTH(c.text) AS char_len,
-                e.vector AS vector_blob
-            FROM chunks c
-            JOIN extractions x ON x.id = c.extraction_id
-            JOIN embeddings e ON e.chunk_id = c.id
-            JOIN documents d ON d.id = x.document_id
-            WHERE d.is_present = 1
-              AND x.status = 'success'
-            ORDER BY x.document_id, c.chunk_index
-            """
-        )
-        rows = cursor.fetchall()
+    cursor = connection.execute(query, (model_id,))
 
-    # 按 document_id 分组收集
-    doc_chunks: Dict[int, List[Tuple[np.ndarray, int]]] = {}
-    for r in rows:
-        doc_id = r["doc_id"]
-        char_len = r["char_len"]
-        vec = np.frombuffer(r["vector_blob"], dtype=np.float32)
+    doc_chunks = {}
+    for row in cursor.fetchall():
+        doc_id = row["doc_id"]
+        char_len = row["char_len"]
+        vec = np.frombuffer(row["vector_blob"], dtype=np.float32)
+
         if doc_id not in doc_chunks:
             doc_chunks[doc_id] = []
         doc_chunks[doc_id].append((vec, char_len))
 
-    # 批量计算每个文档的 Weighted Pooling 向量
-    doc_vectors: Dict[int, np.ndarray] = {}
-    for doc_id, chunk_list in doc_chunks.items():
-        vecs = [item[0] for item in chunk_list]
-        lens = [item[1] for item in chunk_list]
-        doc_vectors[doc_id] = compute_document_vector(vecs, lens)
+    doc_vectors = {}
+    for doc_id, chunks in doc_chunks.items():
+        chunk_vecs = [c[0] for c in chunks]
+        chunk_lens = [c[1] for c in chunks]
+        doc_vectors[doc_id] = compute_document_vector(chunk_vecs, chunk_lens)
 
     return doc_vectors

@@ -124,21 +124,28 @@ def run_search(query, db_path, top_k):
 
 
 def run_classify(db_path):
-    """为已有索引文本的文档批量执行分类与打标签，并将结果持久化。"""
+    """为已有索引文本的文档批量执行 100% 动态无监督分类与多标签打标，并将结果持久化。"""
 
-    from steward import tagging
+    import time
+    from steward.document_index import DocumentIndex
+    from steward.semantic_classifier import run_dynamic_classification_pipeline
 
-    print("正在分析文档正文并生成结构化分类与标签...")
-    stats = tagging.build_classifications(db_path=db_path)
+    print("🚀 启动 Phase 3 端到端 100% 动态无规则分类与多标签打标引擎...")
+    start_time = time.monotonic()
+
+    with DocumentIndex(db_path) as index:
+        stats = run_dynamic_classification_pipeline(index=index)
+
+    elapsed = time.monotonic() - start_time
 
     print("-" * 50)
-    print("【分类与打标签统计】")
-    print(f"已分析文档: {stats['total_documents']} 个")
-    print(f"成功归类文档: {stats['classified_count']} 个")
-    print(f"未归类 (unclassified 兜底): {stats['unclassified_count']} 个")
-    print(f"绑定标签总数: {stats['tag_bindings_count']} 个")
-    print(f"处理总耗时:   {stats['elapsed_seconds']:.3f} 秒")
-    print(f"数据库: {db_path}")
+    print("【100% 动态无监督分类与打标签统计】")
+    print(f"分析文档总数: {stats['total_documents']} 份")
+    print(f"聚类发现簇数: {stats['clusters']} 个主题簇 (离群孤立文件: {stats['outliers']} 份)")
+    print(f"成功打标文件: {stats['tagged_documents']} 份")
+    print(f"全管线总耗时: {elapsed:.3f} 秒")
+    print(f"数据库持久化: {db_path}")
+
 
 
 def run_tags(db_path):
