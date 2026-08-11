@@ -83,8 +83,8 @@ def cluster_document_vectors(
         if norm > 0:
             centroid = centroid / norm
 
-        # 4.2 计算簇内每个文档向量到质心的点积相似度，按相似度降序排列
-        sims = np.dot(c_vecs, centroid)
+        # 4.2 计算簇内各个文档向量与质心的余弦相似度，并做 [0.0, 1.0] 数值截断防溢出
+        sims = np.clip(np.dot(c_vecs, centroid), 0.0, 1.0)
         sorted_indices = np.argsort(-sims)  # 降序索引
         sorted_dids = [c_dids[idx] for idx in sorted_indices]
 

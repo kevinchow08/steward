@@ -414,7 +414,7 @@ class DocumentIndex:
 
             # 批量绑定新的标签关联
             for item in tags:
-                if isinstance(item, (list, tuple)):
+                if isinstance(item, tuple):
                     tag_name, tag_conf = item[0], float(item[1])
                 else:
                     tag_name, tag_conf = str(item), float(confidence)

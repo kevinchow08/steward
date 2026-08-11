@@ -74,16 +74,17 @@ def search_documents(query, embedder, db_path=DEFAULT_DB_PATH, top_k=5):
 
 
 def _cosine_similarity(left, right, normalized):
-    """计算两个向量的相似度；归一化向量可直接点乘。"""
+    """计算两个向量的相似度；归一化向量可直接点乘，并统一做 [0.0, 1.0] 数值截断防溢出。"""
 
     if normalized:
-        return float(np.dot(left, right))
+        return float(np.clip(np.dot(left, right), 0.0, 1.0))
 
     left_norm = np.linalg.norm(left)
     right_norm = np.linalg.norm(right)
     if left_norm == 0 or right_norm == 0:
         return 0.0
-    return float(np.dot(left, right) / (left_norm * right_norm))
+    val = np.dot(left, right) / (left_norm * right_norm)
+    return float(np.clip(val, 0.0, 1.0))
 
 
 def _compact_text(text, max_chars=220):

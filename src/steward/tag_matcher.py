@@ -59,8 +59,8 @@ def match_tags_for_documents(
     doc_ids = list(doc_vectors_map.keys())
     doc_matrix = np.array([doc_vectors_map[did] for did in doc_ids], dtype=np.float32)  # (N, 1024)
 
-    # 5. 执行模态 C 矩阵点积相乘 S = D · T^T (N, 1024) · (1024, M) = (N, M)
-    similarity_matrix = np.dot(doc_matrix, tag_matrix.T)  # (N, M) 2D 相似度打分矩阵
+    # 5. 执行模态 C 矩阵点积相乘 S = D · T^T (N, 1024) · (1024, M) = (N, M)，并做 [0.0, 1.0] 数值截断防溢出
+    similarity_matrix = np.clip(np.dot(doc_matrix, tag_matrix.T), 0.0, 1.0)  # (N, M) 2D 相似度打分矩阵
 
     # 6. 遍历相似度矩阵，提取每份文档高于阈值的匹配 Tag
     results = {}
