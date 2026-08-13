@@ -6,6 +6,7 @@
 
 from dataclasses import dataclass
 from typing import List
+import numpy as np
 
 
 # 默认置信度回退阈值
@@ -142,18 +143,69 @@ def run_dynamic_classification_pipeline(
     if llm is None:
         llm = LocalHttpClusterLLM(base_url="http://localhost:8080/v1")
 
+    # 0. 自动清空旧有的分类、标签与算法簇历史记录，防止残存脏数据
+    print("[Step 0] 清空旧有分类数据...", flush=True)
+    index.clear_classifications()
+
     # 1. 获取所有文档向量
+    print("[Step 3.1] 加载全量文档向量...", flush=True)
     doc_vectors_map = get_all_document_vectors(index)
     if not doc_vectors_map:
         return {"total_documents": 0, "clusters": 0, "tagged_documents": 0}
 
+    print(f"[Step 3.1] 共加载 {len(doc_vectors_map)} 份文档向量。", flush=True)
+
     # 2. 无监督 HDBSCAN 聚类
+    print("[Step 3.2] HDBSCAN 无监督聚类中...", flush=True)
     clusters, outliers = cluster_document_vectors(doc_vectors_map, min_cluster_size=min_cluster_size)
+    print(f"[Step 3.2] 聚类完成：{len(clusters)} 个簇，{len(outliers)} 个原始 Outliers。", flush=True)
+
+    # Step 3.2.5: 最近质心归属 (Nearest-Centroid Fallback)
+    #
+    # 背景：HDBSCAN 是基于密度的聚类算法，只有密度足够高的区域才会形成簇。
+    # 位于低密度边缘地带的文档会被标记为 Outlier (label=-1)，不属于任何簇。
+    # UMAP 降维后 Outlier 比例从 46% 降到 ~16%，但仍有部分边缘文档没有归属。
+    #
+    # 策略：对每个 Outlier 文档，在原始 1024D 向量空间中
+    # 计算它与所有簇质心的余弦相似度，找到"最近的簇"并归入。
+    #
+    # 注意：这里没有相似度门槛筛选，而是强制取 argmax（最大值）。
+    # 原因：UMAP + HDBSCAN 已经形成了语义纯净的簇，Outlier 的主要原因
+    # 是文档处于两个相似簇的"边界模糊地带"，而不是和所有簇都毫无关系。
+    # 因此把 Outlier 归入最近的簇，其语义上仍然是合理的。
+    # (与之前在 1024D 直接跑时不同——那时候 Outlier 往往是真的离群文件)
+    if clusters and outliers:
+        # centroids: 形状 (K, 1024)，K = 簇的总数量
+        # 每一行 centroids[i] 是 clusters[i] 的归一化质心向量
+        centroids = np.array([c.centroid_vector for c in clusters], dtype=np.float32)  # (K, 1024)
+
+        for did in outliers:
+            doc_vec = doc_vectors_map[did]  # shape: (1024,)
+
+            # sims: 形状 (K,) 的 1D 数组
+            # sims[i] = clusters[i] 的质心向量 与 当前 Outlier 文档向量的点积（余弦相似度）
+            # 例如：sims = [0.72, 0.43, 0.91, 0.38, ...]
+            #             clusters[0]  [1]   [2]   [3]  ...
+            sims = np.clip(np.dot(centroids, doc_vec), 0.0, 1.0)  # (K,)
+
+            # np.argmax(sims) 返回 sims 中值最大的元素的下标（即最相似的那个簇在 clusters 列表中的位置）
+            # 上例中 np.argmax([0.72, 0.43, 0.91, 0.38]) = 2，表示 clusters[2] 最相似
+            best_cluster_idx = int(np.argmax(sims))
+
+            # 将该 Outlier 的 doc_id 追加到最相似簇的 doc_ids 列表
+            clusters[best_cluster_idx].doc_ids.append(did)
+
+        print(f"[Step 3.2] 最近质心归属完成：{len(outliers)} 个 Outliers 已分配至最近簇。", flush=True)
+        outliers = []  # 所有 Outlier 已归属，清空
+
 
     # 3. 本地 SLM 理解簇主题，提炼主分类与 Tag Pool
+    print(f"[Step 3.3] 调用本地 SLM 分析 {len(clusters)} 个簇...", flush=True)
     cluster_meta_map = analyze_clusters_metadata(clusters, index, llm=llm)
+    print(f"[Step 3.3] 簇语义分析完成。", flush=True)
 
     # 4. 2D 矩阵点积分数匹配标签
+    print("[Step 3.4] 2D 矩阵点积打标中...", flush=True)
     match_results = match_tags_for_documents(
         doc_vectors_map=doc_vectors_map,
         cluster_metadata_map=cluster_meta_map,
@@ -162,7 +214,10 @@ def run_dynamic_classification_pipeline(
         similarity_threshold=tag_threshold,
     )
 
+    print(f"[Step 3.4] 打标完成：{len(match_results)} 份文档。", flush=True)
+
     # 5. 持久化落盘到 SQLite 表
+    print("[Step 3.5] 持久化写入 SQLite...", flush=True)
     # 建立 cluster_id -> ClusterResult 的映射，方便计算质心相似度置信度
     cluster_obj_map = {c.cluster_id: c for c in clusters}
     doc_cluster_map = {}
@@ -217,6 +272,9 @@ def run_dynamic_classification_pipeline(
             )
 
             saved_count += 1
+
+    print(f"[Step 3.5] 持久化完成：{saved_count} 份文档写入 SQLite。", flush=True)
+    print(f"🎉 分类完成！共 {len(doc_vectors_map)} 份文档，{len(clusters)} 个簇，{saved_count} 份已分类。", flush=True)
 
     return {
         "total_documents": len(doc_vectors_map),

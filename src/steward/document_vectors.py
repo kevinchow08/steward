@@ -5,6 +5,7 @@
 纯依赖 NumPy 矩阵运算，零模型开销，毫秒级完成。
 """
 
+from pathlib import Path
 import sqlite3
 from typing import Dict, List, Tuple
 import numpy as np
@@ -50,16 +51,16 @@ def compute_document_vector(
 def get_all_document_vectors(index=None, db_path: Path = DEFAULT_DB_PATH, model_id: int = 1) -> Dict[int, np.ndarray]:
     """从数据库检索所有成功提取文本的文档及其切片向量，并通过 Pooling 算出一一对应的文档向量。
 
-    :param index: DocumentIndex 实例 (如果已在 Context 中，直接复用连接)
-    :param db_path: SQLite 数据库文件路径 (当 index 为 None 时使用)
+    :param index: DocumentIndex 实例 (若外部传入则直接复用其连接，生命周期由外部管理)
+    :param db_path: SQLite 数据库文件路径 (当 index 为 None 时自动创建临时连接)
     :param model_id: Embedding 模型 ID (默认 1，代表 bge-m3)
     :return: 字典 {document_id: (1024,) float32 np.ndarray}
     """
-    if index is not None:
+    if index:
         return _query_and_compute_vectors(index.connection, model_id)
 
-    with DocumentIndex(db_path) as idx:
-        return _query_and_compute_vectors(idx.connection, model_id)
+    with DocumentIndex(db_path) as temporary_index:
+        return _query_and_compute_vectors(temporary_index.connection, model_id)
 
 
 def _query_and_compute_vectors(connection, model_id: int) -> Dict[int, np.ndarray]:

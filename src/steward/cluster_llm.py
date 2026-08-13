@@ -23,7 +23,7 @@ class ClusterMetadata:
 class BaseClusterLLM:
     """端侧 SLM 推理抽象基类。"""
 
-    def generate_cluster_metadata(self, representative_texts: List[str]) -> ClusterMetadata:
+    def generate_cluster_metadata(self, representative_texts: List, existing_categories: List[str] = None) -> ClusterMetadata:
         raise NotImplementedError
 
 
@@ -36,24 +36,63 @@ class LocalHttpClusterLLM(BaseClusterLLM):
         model_name: str = "Qwen3.5-2B-Q4_K_M.gguf",
     ):
         # 显式使用 trust_env=False 禁用代理对 localhost 8080 端口的误拦截 (彻底解决 502 Bad Gateway)
+        # timeout=30.0 防止 LLM 服务无响应时无限阻塞挂死
         self.client = OpenAI(
             base_url=base_url,
             api_key="no-key-required",
-            http_client=httpx.Client(trust_env=False),
+            http_client=httpx.Client(trust_env=False, timeout=30.0),
         )
         self.model_name = model_name
 
     def generate_cluster_metadata(
         self,
-        representative_texts: List[str],
+        representative_texts: List,   # List of (full_text, file_path) tuples
         existing_categories: List[str] = None,
     ) -> ClusterMetadata:
-        docs_summary = "\n".join([f"- 文件 {i+1} 内容片段: {text[:250]}" for i, text in enumerate(representative_texts)])
+        def _extract_snippet(text: str, file_path: str = "", max_len: int = 300) -> str:
+            """提取文档的有效正文片段，根据文件类型做差异化处理。
+
+            策略：
+            - HTML 文件：先剥离 HTML 标签，再跳过前 200 字符的 <head>/导航区
+            - PDF  文件：不含 HTML 标签，但发票/表单 PDF 的前段是固定表头字段
+                         （如"购买方信息 统一社会信用代码..."），跳过更多（300字）取实质内容
+            - 其他文件（.md/.txt）：直接从头取，内容通常从第一行就有语义
+            """
+            import re
+            ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+
+            # Step 1: 剥离 HTML 标签（仅对 HTML 文件有效，PDF/txt 不含 HTML 标签，re.sub 对其无副作用）
+            clean = re.sub(r"<[^>]+>", " ", text)
+            # Step 2: 合并多余空白
+            clean = re.sub(r"\s+", " ", clean).strip()
+
+            if ext in ("html", "htm"):
+                # HTML 文件：前 200 字符通常是 <head>/<meta>/导航链接等无意义内容
+                start = 200 if len(clean) > 400 else 0
+            elif ext == "pdf":
+                # PDF 文件（尤其是发票/表单）：前段是固定表头字段名，语义模板化，无助于 SLM 分类
+                # 例如："电子发票 购买方信息 统一社会信用代码 名称 项目名称 规格型号..."
+                # 跳过前 350 字符，取实质性正文内容（金额数字、商品名称、备注等）
+                start = 350 if len(clean) > 600 else 0
+            else:
+                # .md / .txt 等纯文本：内容从第一行就有语义，直接从头取
+                start = 0
+
+            return clean[start : start + max_len].strip()
+
+        docs_summary = "\n".join(
+            [f"- 文件 {i+1} 内容片段: {_extract_snippet(text, path)}"
+             for i, (text, path) in enumerate(representative_texts)]
+        )
 
         existing_info = ""
         if existing_categories:
             cat_list_str = "、".join(set(existing_categories))
-            existing_info = f"\n当前已创建的主分类池：[{cat_list_str}]。请优先评估是否可以归入已有主分类；若语义匹配，请直接复用已有名称；仅当确属全新领域时才允许新建名称。\n"
+            existing_info = (
+                f"\n【强制约束】当前已存在的主分类池：[{cat_list_str}]。\n"
+                "你必须优先从已有分类中选择。只要语义接近（例如都是发票/报销/财务相关），就必须直接复用已有名称，禁止新建语义重叠的分类！\n"
+                "仅当该簇内容属于完全不同的全新领域，且已有分类中没有任何语义相近选项时，才允许新建分类名称。\n"
+            )
 
         prompt = (
             "你是一个专业的端侧文件整理 Agent。以下是一组属于同一个主题的代表性文件内容片段：\n\n"
@@ -103,8 +142,9 @@ class LocalHttpClusterLLM(BaseClusterLLM):
 class HeuristicFallbackClusterLLM(BaseClusterLLM):
     """在无本地 LLM 服务运行时的启发式规则降级分析器 (保证 Pipeline 绝对不崩溃)。"""
 
-    def generate_cluster_metadata(self, representative_texts: List[str]) -> ClusterMetadata:
-        combined = " ".join(representative_texts).lower()
+    def generate_cluster_metadata(self, representative_texts: List, existing_categories: List[str] = None) -> ClusterMetadata:
+        # 兼容 (text, path) 元组列表或纯字符串列表
+        combined = " ".join([t[0] if isinstance(t, tuple) else t for t in representative_texts]).lower()
 
         if any(k in combined for k in ("发票", "报销", "餐饮", "交通", "费用", "收据", "金额")):
             return ClusterMetadata(
@@ -143,6 +183,11 @@ def analyze_clusters_metadata(
 ) -> dict:
     """遍历所有 HDBSCAN 主题簇，提取代表性文件内容，调用 SLM 产出簇级元数据。
 
+    流程：
+    1. 对每个簇调用 SLM 产出初步的 category + tag_pool
+    2. 最后做一次「Taxonomy 归一化」：把语义重叠的分类名合并为统一名称
+       （解决"前端开发" vs "技术代码"这类顺序依赖产生的同义词分裂问题）
+
     :return: 字典 {cluster_id: ClusterMetadata}
     """
 
@@ -152,22 +197,28 @@ def analyze_clusters_metadata(
 
     cluster_metadata_map = {}
     known_categories: List[str] = []
+    total = len(clusters)
 
-    for c in clusters:
-        # 1. 从代表性文档中读取正文片段
+    for idx, c in enumerate(clusters):
+        print(f"  [Step 3.3] 分析 Cluster #{c.cluster_id} ({idx+1}/{total}, {len(c.doc_ids)} 份文档)...", flush=True)
         rep_texts = []
         for did in c.representative_doc_ids:
             row = index.connection.execute(
                 """
-                SELECT full_text FROM extractions WHERE document_id = ?
+                SELECT e.full_text, d.path
+                FROM extractions e
+                JOIN documents d ON d.id = e.document_id
+                WHERE e.document_id = ?
                 """,
                 (did,),
             ).fetchone()
             if row and row["full_text"]:
-                rep_texts.append(row["full_text"])
+                # 传入 (full_text, file_path) 二元组，让 _extract_snippet 按文件类型选择策略
+                rep_texts.append((row["full_text"], row["path"]))
 
         if not rep_texts:
-            rep_texts = ["空文档"]
+            rep_texts = [("空文档", "")]
+
 
         # 2. 调用 SLM 生成该簇的 Category 与 Tag Pool (传入已有的主分类上下文，保证收敛)
         meta = llm.generate_cluster_metadata(rep_texts, existing_categories=known_categories)
@@ -176,4 +227,69 @@ def analyze_clusters_metadata(
 
         cluster_metadata_map[c.cluster_id] = meta
 
+    # === Taxonomy 归一化 Pass ===
+    # 问题：SLM 独立命名每个簇，顺序依赖导致语义相近的簇产生同义分类名
+    # 例如："前端开发"和"技术代码"语义重叠，但因为处理顺序不同而被创建为两个独立分类
+    # 修复：收集所有唯一分类名，让 SLM 做一次最终的合并归一，建立统一 taxonomy
+    all_categories = list({m.category for m in cluster_metadata_map.values() if m and m.category})
+    if len(all_categories) > 1:
+        print(f"  [Step 3.3] Taxonomy 归一化：合并 {len(all_categories)} 个分类...", flush=True)
+        canonical_map = _normalize_taxonomy(all_categories, llm)
+        # 将所有簇的 category 映射到归一化名称
+        for cid, meta in cluster_metadata_map.items():
+            if meta and meta.category in canonical_map:
+                cluster_metadata_map[cid] = ClusterMetadata(
+                    category=canonical_map[meta.category],
+                    tag_pool=meta.tag_pool,
+                )
+
     return cluster_metadata_map
+
+
+def _normalize_taxonomy(categories: List[str], llm: BaseClusterLLM) -> dict:
+    """将一组粗粒度分类名归一化为统一 Taxonomy，合并语义重叠的名称。
+
+    :param categories: 所有簇产出的原始分类名列表
+    :param llm: SLM 实例
+    :return: {原始分类名: 归一化后的标准分类名}
+    """
+    cat_list_str = "\n".join([f"- {c}" for c in categories])
+    prompt = (
+        "以下是一组文件分类名称，其中可能存在语义重叠或同义词（如'前端开发'与'技术代码'实质相同）：\n\n"
+        f"{cat_list_str}\n\n"
+        "请将语义相近的名称合并为同一个标准名称，建立一个精简、无重叠的顶级分类 Taxonomy。\n"
+        "规则：\n"
+        "1. 合并语义重叠的分类（如: 技术代码 / 前端开发 / 技术文档 → 统一为「技术代码」）\n"
+        "2. 保留语义明确不同的分类（如: 财务报销 / 证件合同 / 英语学习 不应合并）\n"
+        "3. 输出一个 JSON 对象，key 为原始名称，value 为归一化后的标准名称\n\n"
+        "请严格输出纯 JSON，不要包含任何 Markdown 标记或解释：\n"
+        "{\n"
+        '  "原始名称1": "标准名称",\n'
+        '  "原始名称2": "标准名称"\n'
+        "}"
+    )
+
+    import json
+    try:
+        resp = llm.client.chat.completions.create(
+            model=llm.model_name,
+            messages=[
+                {"role": "system", "content": "你是一个严格仅返回 JSON 的文件分类归一化助手。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        content = resp.choices[0].message.content.strip()
+        start = content.find("{")
+        end = content.rfind("}")
+        if start != -1 and end != -1:
+            mapping = json.loads(content[start:end+1])
+            # 验证：确保只接受字符串值，过滤异常输出
+            return {k: str(v) for k, v in mapping.items() if isinstance(v, str)}
+    except Exception as e:
+        print(f"  [Warning] Taxonomy 归一化失败 ({e})，跳过合并。", flush=True)
+
+    # 降级：原样返回（每个名称映射到自身）
+    return {c: c for c in categories}
+

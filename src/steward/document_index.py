@@ -360,6 +360,17 @@ class DocumentIndex:
         ).fetchone()
         return row["id"]
 
+    def clear_classifications(self):
+        """清空旧有的分类、标签与算法簇历史数据，保证重新分类时无残存数据。"""
+        with self.connection:
+            # 必须最先解除 documents 对 semantic_clusters 的外键引用，否则 DELETE 会触发 FOREIGN KEY 约束报错！
+            self.connection.execute("UPDATE documents SET cluster_id = NULL;")
+            self.connection.execute("DELETE FROM document_tags;")
+            self.connection.execute("DELETE FROM document_classifications;")
+            self.connection.execute("DELETE FROM semantic_clusters;")
+            self.connection.execute("DELETE FROM tags;")
+            self.connection.execute("DELETE FROM categories;")
+
     def save_classification(
         self,
         document_id,
