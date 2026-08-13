@@ -80,10 +80,22 @@ class LocalHttpClusterLLM(BaseClusterLLM):
 
             return clean[start : start + max_len].strip()
 
-        docs_summary = "\n".join(
-            [f"- 文件 {i+1} 内容片段: {_extract_snippet(text, path)}"
-             for i, (text, path) in enumerate(representative_texts)]
-        )
+        import os
+        docs_summary_parts = []
+        for i, (text, path) in enumerate(representative_texts):
+            # 文件名和父目录是最重要的上下文信号
+            # 例如：/doc/Nest 通关秘籍/109.会议室预订系统.md
+            # →「Nest 通关秘籍」说明这是技术课程，「会议室预订系统」只是课程里的实战项目名，不是分类依据
+            filename = os.path.basename(path) if path else "未知文件"
+            parent_dir = os.path.basename(os.path.dirname(path)) if path else ""
+            snippet = _extract_snippet(text, path)
+            docs_summary_parts.append(
+                f"- 文件 {i+1}\n"
+                f"  所在目录: {parent_dir}\n"
+                f"  文件名: {filename}\n"
+                f"  内容片段: {snippet}"
+            )
+        docs_summary = "\n".join(docs_summary_parts)
 
         existing_info = ""
         if existing_categories:
@@ -95,12 +107,15 @@ class LocalHttpClusterLLM(BaseClusterLLM):
             )
 
         prompt = (
-            "你是一个专业的端侧文件整理 Agent。以下是一组属于同一个主题的代表性文件内容片段：\n\n"
+            "你是一个专业的端侧文件整理 Agent。以下是一组属于同一个主题的代表性文件：\n\n"
             f"{docs_summary}\n\n"
             f"{existing_info}\n"
             "分类约束说明：\n"
-            "1. category 必须是高度抽象的顶级宏观分类 (2-4个字，如: 财务报销 / 招聘简历 / 技术代码 / 会议总结 / 证件合同)。\n"
-            "2. 严禁把具体细节词 (如: 打车、餐饮、发票、Python) 填入 category！所有具体细节词必须全部归入 tag_pool。\n\n"
+            "1. 【最重要】优先根据'所在目录'和'文件名'来判断文件的用途类型，而不是被内容里的具体业务词汇误导。\n"
+            "   例如：目录是'Nest 通关秘籍'的文件，无论内容涉及'会议室'还是'聊天室'，本质都是技术教程，分类应为技术代码/后端开发。\n"
+            "   例如：目录是'报销相关'的文件，无论文件名是什么，分类应为财务报销。\n"
+            "2. category 必须是高度抽象的顶级宏观分类 (2-4个字，如: 财务报销 / 技术代码 / 证件合同 / 运动健身 / 投资理财)。\n"
+            "3. 严禁把具体业务词（如: 会议室、聊天室、餐饮、发票）填入 category！这些是 tag_pool 的内容。\n\n"
             "请严格输出如下格式的纯 JSON，绝对不要包含任何 Markdown 标记或多余解释：\n"
             "{\n"
             '  "category": "极简的高层主分类名称",\n'

@@ -42,7 +42,7 @@ def cluster_document_vectors(
     min_cluster_size: int = 5,
     min_samples: int = 2,
     umap_n_components: int = 20,
-    umap_n_neighbors: int = 15,
+    umap_n_neighbors: int = 30,   # 30：更多邻域 → 保留更多全局结构 → 簇更大更少（原15导致77簇过细）
 ) -> Tuple[List[ClusterResult], List[int]]:
     """对全量文档向量先 UMAP 降维再 HDBSCAN 无监督自适应聚类。
 
