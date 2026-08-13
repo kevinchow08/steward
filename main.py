@@ -11,8 +11,9 @@ BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR / "src"))
 
 RULES_PATH = BASE_DIR / "config" / "rules.yaml"
-OUTPUT_DIR = BASE_DIR / "output"
-DEFAULT_DB_PATH = OUTPUT_DIR / "steward.db"
+PROJECT_ROOT = Path(__file__).resolve().parent
+OUTPUT_DIR = PROJECT_ROOT / "output"
+DEFAULT_DB_PATH = PROJECT_ROOT / "steward.db"
 
 
 def run_week1_scan(target_dir):
@@ -149,7 +150,7 @@ def run_classify(db_path):
 
 
 def run_tags(db_path):
-    """展示 SQLite 中已分类文档的主分类、置信度及关联标签列表。"""
+    """展示 SQLite 中已分类文档的主分类、置信度及关联标签列表，并输出到文件。"""
 
     from steward.document_index import DocumentIndex
 
@@ -160,14 +161,25 @@ def run_tags(db_path):
         print("当前没有任何已分类打标的文档。请先运行: python main.py classify")
         return
 
-    print(f"共查找到 {len(records)} 份已分类文档:\n")
-    for index, r in enumerate(records, start=1):
-        tags_str = ", ".join(r["tags"]) if r["tags"] else "(无标签)"
-        status_flag = "✅" if r["status"] == "classified" else "⚠️"
-        print(f"{index}. {status_flag} 分类: [{r['category']}] (置信度: {r['confidence']:.2f})")
-        print(f"   文件: {r['path']}")
-        print(f"   标签: {tags_str}")
-        print(f"   依据: {r['reasoning']}\n")
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    report_path = OUTPUT_DIR / "tags_report.md"
+
+    print(f"共查找到 {len(records)} 份已分类文档。正在生成报告...")
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("# 文档分类与标签报告\n\n")
+        f.write(f"**总计**: {len(records)} 份文档\n\n")
+        for index, r in enumerate(records, start=1):
+            tags_str = ", ".join(r["tags"]) if r["tags"] else "(无标签)"
+            status_flag = "✅" if r["status"] == "classified" else "⚠️"
+            f.write(f"### {index}. {status_flag} 分类: [{r['category']}]\n")
+            f.write(f"- **置信度**: {r['confidence']:.2f}\n")
+            f.write(f"- **文件**: `{r['path']}`\n")
+            f.write(f"- **标签**: {tags_str}\n")
+            f.write(f"- **依据**: {r['reasoning']}\n\n")
+
+    print(f"✅ 报告已生成: {report_path}")
 
 
 def main():

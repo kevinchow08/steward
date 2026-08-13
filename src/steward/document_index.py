@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "output" / "steward.db"
+DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "steward.db"
 
 
 def _utc_now():

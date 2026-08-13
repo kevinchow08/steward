@@ -167,36 +167,32 @@ def run_dynamic_classification_pipeline(
     # UMAP 降维后 Outlier 比例从 46% 降到 ~16%，但仍有部分边缘文档没有归属。
     #
     # 策略：对每个 Outlier 文档，在原始 1024D 向量空间中
-    # 计算它与所有簇质心的余弦相似度，找到"最近的簇"并归入。
+    # 计算它与所有簇质心的余弦相似度，找到"最近的簇"。
     #
-    # 注意：这里没有相似度门槛筛选，而是强制取 argmax（最大值）。
-    # 原因：UMAP + HDBSCAN 已经形成了语义纯净的簇，Outlier 的主要原因
-    # 是文档处于两个相似簇的"边界模糊地带"，而不是和所有簇都毫无关系。
-    # 因此把 Outlier 归入最近的簇，其语义上仍然是合理的。
-    # (与之前在 1024D 直接跑时不同——那时候 Outlier 往往是真的离群文件)
+    # 阈值控制：加入 0.50 相似度阈值（Cosine Similarity）。
+    # 如果相似度低于阈值，说明该文档真的和任何已知主题无关，保留为 Outlier（最终会标记为"未分类"），
+    # 避免强行塞入不相关的簇。
     if clusters and outliers:
-        # centroids: 形状 (K, 1024)，K = 簇的总数量
-        # 每一行 centroids[i] 是 clusters[i] 的归一化质心向量
         centroids = np.array([c.centroid_vector for c in clusters], dtype=np.float32)  # (K, 1024)
+        
+        remaining_outliers = []
+        assigned_count = 0
 
         for did in outliers:
             doc_vec = doc_vectors_map[did]  # shape: (1024,)
 
-            # sims: 形状 (K,) 的 1D 数组
-            # sims[i] = clusters[i] 的质心向量 与 当前 Outlier 文档向量的点积（余弦相似度）
-            # 例如：sims = [0.72, 0.43, 0.91, 0.38, ...]
-            #             clusters[0]  [1]   [2]   [3]  ...
             sims = np.clip(np.dot(centroids, doc_vec), 0.0, 1.0)  # (K,)
-
-            # np.argmax(sims) 返回 sims 中值最大的元素的下标（即最相似的那个簇在 clusters 列表中的位置）
-            # 上例中 np.argmax([0.72, 0.43, 0.91, 0.38]) = 2，表示 clusters[2] 最相似
             best_cluster_idx = int(np.argmax(sims))
+            best_sim = sims[best_cluster_idx]
 
-            # 将该 Outlier 的 doc_id 追加到最相似簇的 doc_ids 列表
-            clusters[best_cluster_idx].doc_ids.append(did)
+            if best_sim >= 0.50:
+                clusters[best_cluster_idx].doc_ids.append(did)
+                assigned_count += 1
+            else:
+                remaining_outliers.append(did)
 
-        print(f"[Step 3.2] 最近质心归属完成：{len(outliers)} 个 Outliers 已分配至最近簇。", flush=True)
-        outliers = []  # 所有 Outlier 已归属，清空
+        print(f"[Step 3.2] 最近质心归属完成：{assigned_count} 个分配至最近簇，{len(remaining_outliers)} 个仍然是孤立文件。", flush=True)
+        outliers = remaining_outliers  # 更新为未归属的 outlier
 
 
     # 3. 本地 SLM 理解簇主题，提炼主分类与 Tag Pool
