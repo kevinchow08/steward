@@ -1,16 +1,46 @@
-"""端侧文档语义分类与打标签引擎。
+"""端侧文档分类引擎 V2—— 逐文件直接分类。
 
-根据文档文本与元数据提取主分类、多标签、置信度及推理依据。
-严格遵循低置信度（< 0.70）自动回退为 unclassified 的兜底原则。
+每份文档独立调用一次本地 SLM，产出 category + tags + reasoning，不再依赖聚类簇的
+集体判断（V1 的 Cluster-then-Label 设计已废弃，为什么废弃、V2 具体怎么设计，
+见 docs/dynamic_classification_architecture.md，这里只放实现）。
+
+六阶段管线：
+  ① 内容量预筛 —— 文本过短/无信息量，直接判 unclassified，不调用 SLM
+  ② 逐文件 SLM 分类 —— 并发调用，独立产出 category + tags + reasoning
+  ③ Taxonomy 归一化 —— 合并同义分类名（对象是分类名字符串，不涉及向量）
+  ④ 置信度计算与复核 —— 文档向量跟全部候选分类名做点积，检验 SLM 判定的分类
+     是不是候选里排名最靠前（或跟最高分差距在容差内）的那个，不是就打回 unclassified
+  ⑤ 持久化到 SQLite
 """
 
+import json
+import os
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List, Optional, Tuple
+
+import httpx
 import numpy as np
+from openai import OpenAI
 
 
-# 默认置信度回退阈值
-CONFIDENCE_THRESHOLD = 0.70
+# Stage①：内容去空白后短于这个字符数，直接判 unclassified，不调用 SLM
+MIN_CONTENT_LENGTH = 30
+
+# Stage④：SLM 判定的分类，点积只要跟候选池里最高分差距不超过这个值就仍然采信。
+# 这是排名容差，不是绝对阈值——不同分类名天生的点积基线不一样（越具体的分类名基线越高），
+# 拿绝对值卡所有分类不合理，实测过（见架构文档）。这个容差数值还没有足够真实边缘案例校准，
+# 是保守起步值，后续要跟着实际跑出来的数据回头调整。
+CONFIDENCE_MARGIN = 0.03
+
+# 并发调用 SLM 的线程数。这是推理引擎侧的配置，需要跟 llama-server 启动时的
+# -np（slot 数）匹配，不要跟下面的分类逻辑耦合——后续要支持根据硬件自动探测时，
+# 只需要改调用方传进来的这一个参数，不用碰管线逻辑本身。
+DEFAULT_MAX_WORKERS = 8
+
+DEFAULT_LLM_BASE_URL = "http://127.0.0.1:8080/v1"
+DEFAULT_LLM_MODEL = "Qwen3.5-2B-Q4_K_M.gguf"
 
 
 @dataclass
@@ -18,264 +48,314 @@ class ClassificationResult:
     """分类与打标签的标准输出契约。"""
 
     category: str
-    tags: List[str]
+    tags: List[Tuple[str, float]]  # [(tag_name, confidence)]
     confidence: float
     status: str
     reasoning: str
 
 
-def classify_document_text(text: str, file_path: str = "", basic_type: str = "document") -> ClassificationResult:
-    """分析文档正文，输出结构化的分类、标签与置信度。
-
-    当前第一版使用确定性的规则/关键词提取引擎，
-    后续可无缝替换或接入本地轻量 SLM 大模型推理。
-    """
-
-    if not text or not text.strip():
-        return ClassificationResult(
-            category="unclassified",
-            tags=[],
-            confidence=0.0,
-            status="unclassified",
-            reasoning="文档没有提取到有效文字内容",
-        )
-
-    text_lower = text.lower()
-    path_lower = file_path.lower()
-
-    # 1. 尝试匹配定义好的业务主分类规则
-    matched_category = None
-    confidence = 0.0
-    reasoning = ""
-    extracted_tags = []
-
-    # 规则 1：招聘简历类
-    if any(k in text_lower or k in path_lower for k in ("简历", "resume", "cv", "求职", "工作经历", "项目经验")):
-        matched_category = "招聘简历"
-        confidence = 0.95
-        reasoning = "正文中包含简历、工作经历或项目经验等典型词汇"
-        extracted_tags.extend(["简历", "人力资源"])
-
-    # 规则 2：销售与财务数据类
-    elif any(k in text_lower or k in path_lower for k in ("销售数据", "财报", "报销", "发票", "收支", "资产配置", "投资", "bogleheads")):
-        matched_category = "财务销售"
-        confidence = 0.90
-        reasoning = "正文中包含财报、报销、发票或投资配置等财务特征"
-        extracted_tags.extend(["财务", "数据"])
-
-    # 规则 3：代码与开发工具/技术文档
-    elif any(k in text_lower or k in path_lower for k in ("agent", "prompt", "mcp", "python", "javascript", "架构", "api", "git")):
-        matched_category = "技术文档"
-        confidence = 0.88
-        reasoning = "正文中包含 Agent、API、架构或编程语言相关词汇"
-        extracted_tags.extend(["技术", "开发"])
-
-    # 规则 4：工作周报/总结类
-    elif any(k in text_lower or k in path_lower for k in ("周报", "月报", "总结", "weekly report", "工作计划")):
-        matched_category = "工作周报"
-        confidence = 0.85
-        reasoning = "正文中包含周报、月报或工作总结特征"
-        extracted_tags.extend(["工作", "总结"])
-
-    # 规则 5：个人证件与合同类
-    elif any(k in text_lower or k in path_lower for k in ("身份证", "护照", "合同", "协议", "身份证号")):
-        matched_category = "证件合同"
-        confidence = 0.92
-        reasoning = "正文中包含合同、协议或证件信息"
-        extracted_tags.extend(["合同", "重要证件"])
-
-    # 2. 提取泛化标签（根据高频词/环境词补充）
-    if "agent" in text_lower:
-        extracted_tags.append("Agent")
-    if "2026" in text_lower or "2026" in path_lower:
-        extracted_tags.append("2026")
-    if "python" in text_lower:
-        extracted_tags.append("Python")
-    if "上海" in text_lower or "shanghai" in path_lower:
-        extracted_tags.append("上海")
-
-    # 去重并排序标签
-    unique_tags = sorted(list(set(extracted_tags)))
-
-    # 3. 校验置信度阈值：低于 0.70 触发 unclassified 兜底
-    if matched_category is None or confidence < CONFIDENCE_THRESHOLD:
-        return ClassificationResult(
-            category="unclassified",
-            tags=unique_tags,
-            confidence=round(confidence, 2),
-            status="unclassified",
-            reasoning="内容无法高置信度归入已知主分类",
-        )
-
-    return ClassificationResult(
-        category=matched_category,
-        tags=unique_tags,
-        confidence=round(confidence, 2),
-        status="classified",
-        reasoning=reasoning,
+def _build_llm_client(base_url: str = DEFAULT_LLM_BASE_URL) -> OpenAI:
+    # trust_env=False 禁用代理对 localhost 的误拦截；timeout 防止服务无响应时无限阻塞
+    return OpenAI(
+        base_url=base_url,
+        api_key="no-key-required",
+        http_client=httpx.Client(trust_env=False, timeout=60.0),
     )
+
+
+def _extract_snippet(text: str, file_path: str = "", max_len: int = 1500) -> str:
+    """提取文档的有效正文片段，根据文件类型做差异化处理。
+
+    - HTML 文件：先剥离标签，跳过前 200 字符的 <head>/导航区
+    - PDF 文件：跳过前 350 字符（发票/表单类 PDF 前段通常是固定表头字段）
+    - 其他（.md/.txt）：直接从头取，内容通常从第一行就有语义
+    """
+    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+
+    clean = re.sub(r"<[^>]+>", " ", text)
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    if ext in ("html", "htm"):
+        start = 200 if len(clean) > 400 else 0
+    elif ext == "pdf":
+        start = 350 if len(clean) > 600 else 0
+    else:
+        start = 0
+
+    return clean[start:start + max_len].strip()
+
+
+def _classify_one_document(client: OpenAI, model_name: str, path: str, full_text: str) -> Optional[dict]:
+    """调用一次 SLM，独立判断单份文档的分类。返回 {category, tags, reasoning}，解析失败返回 None。"""
+
+    filename = os.path.basename(path)
+    parent_dir = os.path.basename(os.path.dirname(path))
+    snippet = _extract_snippet(full_text, path)
+
+    # 静态说明文字全部放在前面、连成一段不变的前缀，变化的文件内容放最后——
+    # prompt 缓存只认"从开头连续匹配到哪"，变化内容一旦出现在中间，后面哪怕是完全
+    # 相同的文字也不能命中缓存了（KV cache 是按 token 顺序累积算出来的，后面的 token
+    # 依赖前面全部 token 的上下文，前缀一旦分叉，后面就不再是"同一段计算"）。
+    prompt = (
+        "你是一个专业的端侧文件整理助手。请分析给定的文件，独立给出分类结论。\n\n"
+        "要求：category(2-4字宏观主分类)、tags(3-6个细粒度关键词)、reasoning(一句话依据)。\n"
+        "严格输出纯JSON，不要markdown标记：\n"
+        '{"category": "...", "tags": ["...", "..."], "reasoning": "..."}\n\n'
+        "待分析的文件如下：\n"
+        f"所在目录: {parent_dir}\n文件名: {filename}\n内容片段: {snippet}"
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "你是严格只返回JSON格式的文件分类助手。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=200,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        content = resp.choices[0].message.content.strip()
+        start, end = content.find("{"), content.rfind("}")
+        if start == -1 or end == -1:
+            return None
+        parsed = json.loads(content[start:end + 1])
+        category = str(parsed.get("category", "")).strip()
+        tags = [str(t).strip() for t in parsed.get("tags", []) if str(t).strip()]
+        reasoning = str(parsed.get("reasoning", "")).strip()
+        if not category:
+            return None
+        return {"category": category, "tags": tags, "reasoning": reasoning}
+    except Exception as e:
+        print(f"  [Warning] 分类失败 {filename}: {e}", flush=True)
+        return None
+
+
+def _normalize_taxonomy(categories: List[str], client: OpenAI, model_name: str) -> Dict[str, str]:
+    """把一组分类名里语义重叠的合并为统一名称。
+
+    :return: {原始分类名: 归一化后的标准分类名}，每个原始名都保证有映射（找不到就映射到自己）
+    """
+    if not categories:
+        return {}
+    if len(categories) == 1:
+        return {categories[0]: categories[0]}
+
+    cat_list_str = "\n".join([f"- {c}" for c in categories])
+    prompt = (
+        "以下是一组文件分类名称，其中可能存在语义重叠或同义词（如'前端开发'与'技术文档'实质相同）：\n\n"
+        f"{cat_list_str}\n\n"
+        "请将语义相近的名称合并为同一个标准名称，建立一个精简、无重叠的顶级分类 Taxonomy。\n"
+        "规则：\n"
+        "1. 合并语义重叠的分类（如: 技术代码 / 前端开发 / 技术文档 → 统一为「技术文档」）\n"
+        "2. 保留语义明确不同的分类（如: 财务报销 / 证件合同 / 英语学习 不应合并）\n"
+        "3. 输出一个 JSON 对象，key 为原始名称，value 为归一化后的标准名称，每个原始名称都要出现\n\n"
+        "请严格输出纯 JSON，不要包含任何 Markdown 标记或解释：\n"
+        '{"原始名称1": "标准名称", "原始名称2": "标准名称"}'
+    )
+
+    try:
+        resp = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {"role": "system", "content": "你是严格只返回 JSON 的文件分类归一化助手。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.1,
+            max_tokens=len(categories) * 40 + 200,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        content = resp.choices[0].message.content.strip()
+        start, end = content.find("{"), content.rfind("}")
+        if start != -1 and end != -1:
+            mapping = json.loads(content[start:end + 1])
+            result = {k: v for k, v in mapping.items() if isinstance(v, str)}
+            # LLM 的回答不一定覆盖了每一个原始分类名（哪怕 prompt 里明确要求了，2B 小模型
+            # 也可能漏掉几个）。setdefault(c, c)：result 里已经有 c 就不动，没有就补一条
+            # "自己映射到自己"（代表这个分类名不用合并，原样保留）。这不是可有可无的装饰——
+            # 后面算置信度排名的候选池就是取这个映射的 values，漏了就会在候选池里也漏掉，
+            # 变成一个不容易发现的正确性问题。
+            for c in categories:
+                result.setdefault(c, c)
+            return result
+    except Exception as e:
+        print(f"  [Warning] Taxonomy 归一化失败 ({e})，跳过合并，保留原始分类名。", flush=True)
+
+    return {c: c for c in categories}
 
 
 def run_dynamic_classification_pipeline(
     index,
     embedder=None,
-    llm=None,
-    min_cluster_size: int = 3,
-    tag_threshold: float = 0.55,
+    llm_base_url: str = DEFAULT_LLM_BASE_URL,
+    llm_model: str = DEFAULT_LLM_MODEL,
+    max_workers: int = DEFAULT_MAX_WORKERS,
+    min_content_length: int = MIN_CONTENT_LENGTH,
+    confidence_margin: float = CONFIDENCE_MARGIN,
 ) -> dict:
-    """运行 Phase 3 端到端 100% 动态分类与多标签打标管线。
+    """V2 端到端逐文件分类管线，见模块顶部的五阶段说明。"""
 
-    过程涵盖：
-    1. Step 3.1: 全量文档 Chunk 向量加权池化
-    2. Step 3.2: HDBSCAN 无监督密度聚类
-    3. Step 3.3: 抽样文本送端侧 SLM (Qwen3.5-2B) 提取 Category 与 Tag Pool
-    4. Step 3.4: NumPy 2D 矩阵乘法全量点积打标 S = D · T^T
-    5. Step 3.5: 将结果全量持久化落盘至 SQLite 四张数据表
-    """
-    from steward.clustering import cluster_document_vectors
-    from steward.cluster_llm import LocalHttpClusterLLM, analyze_clusters_metadata
     from steward.document_vectors import get_all_document_vectors
     from steward.embeddings import LocalEmbedder
-    from steward.tag_matcher import match_tags_for_documents
 
     if embedder is None:
         embedder = LocalEmbedder()
-    if llm is None:
-        llm = LocalHttpClusterLLM(base_url="http://localhost:8080/v1")
 
-    # 0. 自动清空旧有的分类、标签与算法簇历史记录，防止残存脏数据
+    client = _build_llm_client(llm_base_url)
+
     print("[Step 0] 清空旧有分类数据...", flush=True)
     index.clear_classifications()
 
-    # 1. 获取所有文档向量
-    print("[Step 3.1] 加载全量文档向量...", flush=True)
+    print("[Step 1] 加载已提取文本的文档...", flush=True)
+    rows = index.connection.execute(
+        """
+        SELECT d.id AS document_id, d.path AS path, x.full_text AS full_text
+        FROM documents d JOIN extractions x ON x.document_id = d.id
+        WHERE d.is_present = 1 AND x.status = 'success'
+        """
+    ).fetchall()
+    print(f"[Step 1] 共 {len(rows)} 份文档。", flush=True)
+
+    # Stage①：内容量预筛
+    to_classify = []
+    skipped_short = []
+    for row in rows:
+        text = (row["full_text"] or "").strip()
+        if len(text) < min_content_length:
+            skipped_short.append(row["document_id"])
+        else:
+            to_classify.append(row)
+    print(f"[Step 1] 内容过短跳过 {len(skipped_short)} 份，{len(to_classify)} 份进入 SLM 分类。", flush=True)
+
+    # Stage②：逐文件并发 SLM 分类
+    print(f"[Step 2] {max_workers} 路并发调用 SLM...", flush=True)
+    raw_results: Dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_classify_one_document, client, llm_model, row["path"], row["full_text"]): row["document_id"]
+            for row in to_classify
+        }
+        done = 0
+        for future in as_completed(futures):
+            doc_id = futures[future]
+            result = future.result()
+            if result:
+                raw_results[doc_id] = result
+            done += 1
+            if done % 50 == 0 or done == len(to_classify):
+                print(f"  [Step 2] 已完成 {done}/{len(to_classify)}", flush=True)
+
+    parse_failed = [row["document_id"] for row in to_classify if row["document_id"] not in raw_results]
+    print(f"[Step 2] 分类完成：{len(raw_results)} 份成功，{len(parse_failed)} 份解析失败。", flush=True)
+
+    # Stage③：Taxonomy 归一化（对象是分类名字符串，不涉及向量）
+    print("[Step 3] Taxonomy 归一化...", flush=True)
+    raw_categories = sorted({r["category"] for r in raw_results.values()})
+    canonical_map = _normalize_taxonomy(raw_categories, client, llm_model)
+    for r in raw_results.values():
+        r["category"] = canonical_map.get(r["category"], r["category"])
+    canonical_categories = sorted(set(canonical_map.values()))
+    print(f"[Step 3] {len(raw_categories)} 个原始分类名归一化为 {len(canonical_categories)} 个。", flush=True)
+
+    # Stage④：置信度计算与复核（借用③清理好的候选池，是文档级别的独立校验）
+    # category 和 tag 的置信度用的是同一套数学：文档向量分别跟候选文本的向量做点积。
+    # category 的候选池是归一化后的分类名列表；tag 没有归一化，候选池就是这份文档自己
+    # 被打上的那几个标签——只需要知道"这个标签跟这篇文档本身贴合到什么程度"，不需要
+    # 跟别的文档的标签比较，所以不用像 category 那样做跨文档的排名判断。
+    print("[Step 4] 计算文档向量与分类名/标签向量的点积置信度...", flush=True)
     doc_vectors_map = get_all_document_vectors(index)
-    if not doc_vectors_map:
-        return {"total_documents": 0, "clusters": 0, "tagged_documents": 0}
+    final_results: Dict[int, ClassificationResult] = {}
 
-    print(f"[Step 3.1] 共加载 {len(doc_vectors_map)} 份文档向量。", flush=True)
+    def _score_tags(raw_tags: List[str], doc_vec) -> List[Tuple[str, float]]:
+        # 每份文档自己的标签现场单独 embed，矩阵行顺序天然跟 raw_tags 顺序一致，
+        # 不需要维护任何"标签名 → 行号"的查表结构。embed_documents() 出来的向量
+        # 已经是单位向量（见 embeddings.py 的 normalize_embeddings=True），不用再手动归一化。
+        if doc_vec is None or not raw_tags:
+            return [(t, 0.5) for t in raw_tags]
+        tag_matrix = np.array(embedder.embed_documents(raw_tags), dtype=np.float32)
+        sims = np.clip(tag_matrix @ doc_vec, 0.0, 1.0)
+        # [("前端", 0.61), ("后端", 0.58), ("配置", 0.52)]——一个装着 (标签名, 分数) 元组的普通列表
+        return list(zip(raw_tags, sims.tolist()))
 
-    # 2. 无监督 HDBSCAN 聚类
-    print("[Step 3.2] HDBSCAN 无监督聚类中...", flush=True)
-    clusters, outliers = cluster_document_vectors(doc_vectors_map, min_cluster_size=min_cluster_size)
-    print(f"[Step 3.2] 聚类完成：{len(clusters)} 个簇，{len(outliers)} 个原始 Outliers。", flush=True)
+    if canonical_categories and raw_results:
+        # 同样，embed_documents() 出来的向量已经归一化过，这里不用再手动做一遍。
+        category_matrix = np.array(embedder.embed_documents(canonical_categories), dtype=np.float32)
+        category_index = {name: i for i, name in enumerate(canonical_categories)}
 
-    # Step 3.2.5: 最近质心归属 (Nearest-Centroid Fallback)
-    #
-    # 背景：HDBSCAN 是基于密度的聚类算法，只有密度足够高的区域才会形成簇。
-    # 位于低密度边缘地带的文档会被标记为 Outlier (label=-1)，不属于任何簇。
-    # UMAP 降维后 Outlier 比例从 46% 降到 ~16%，但仍有部分边缘文档没有归属。
-    #
-    # 策略：对每个 Outlier 文档，在原始 1024D 向量空间中
-    # 计算它与所有簇质心的余弦相似度，找到"最近的簇"。
-    #
-    # 阈值控制：加入 0.50 相似度阈值（Cosine Similarity）。
-    # 如果相似度低于阈值，说明该文档真的和任何已知主题无关，保留为 Outlier（最终会标记为"未分类"），
-    # 避免强行塞入不相关的簇。
-    if clusters and outliers:
-        centroids = np.array([c.centroid_vector for c in clusters], dtype=np.float32)  # (K, 1024)
-        
-        remaining_outliers = []
-        assigned_count = 0
+        for doc_id, r in raw_results.items():
+            doc_vec = doc_vectors_map.get(doc_id)
+            assigned_category = r["category"]
+            scored_tags = _score_tags(r["tags"], doc_vec)
 
-        for did in outliers:
-            doc_vec = doc_vectors_map[did]  # shape: (1024,)
-
-            sims = np.clip(np.dot(centroids, doc_vec), 0.0, 1.0)  # (K,)
-            best_cluster_idx = int(np.argmax(sims))
-            best_sim = sims[best_cluster_idx]
-
-            if best_sim >= 0.50:
-                clusters[best_cluster_idx].doc_ids.append(did)
-                assigned_count += 1
-            else:
-                remaining_outliers.append(did)
-
-        print(f"[Step 3.2] 最近质心归属完成：{assigned_count} 个分配至最近簇，{len(remaining_outliers)} 个仍然是孤立文件。", flush=True)
-        outliers = remaining_outliers  # 更新为未归属的 outlier
-
-
-    # 3. 本地 SLM 理解簇主题，提炼主分类与 Tag Pool
-    print(f"[Step 3.3] 调用本地 SLM 分析 {len(clusters)} 个簇...", flush=True)
-    cluster_meta_map = analyze_clusters_metadata(clusters, index, llm=llm)
-    print(f"[Step 3.3] 簇语义分析完成。", flush=True)
-
-    # 4. 2D 矩阵点积分数匹配标签
-    print("[Step 3.4] 2D 矩阵点积打标中...", flush=True)
-    match_results = match_tags_for_documents(
-        doc_vectors_map=doc_vectors_map,
-        cluster_metadata_map=cluster_meta_map,
-        clusters=clusters,
-        embedder=embedder,
-        similarity_threshold=tag_threshold,
-    )
-
-    print(f"[Step 3.4] 打标完成：{len(match_results)} 份文档。", flush=True)
-
-    # 5. 持久化落盘到 SQLite 表
-    print("[Step 3.5] 持久化写入 SQLite...", flush=True)
-    # 建立 cluster_id -> ClusterResult 的映射，方便计算质心相似度置信度
-    cluster_obj_map = {c.cluster_id: c for c in clusters}
-    doc_cluster_map = {}
-    for c in clusters:
-        for did in c.doc_ids:
-            doc_cluster_map[did] = c.cluster_id
-
-    saved_count = 0
-    with index.connection:
-        # 5.1 先保存算法解耦层 semantic_clusters 记录，生成数据库 cluster_db_id
-        cluster_db_id_map = {}
-        for c in clusters:
-            meta = cluster_meta_map.get(c.cluster_id)
-            if meta:
-                cat_id = index._get_or_create_category(meta.category)
-                db_cid = index.save_semantic_cluster(
-                    category_id=cat_id,
-                    centroid_vector=c.centroid_vector,
-                    tag_pool=meta.tag_pool,
-                    summary=f"Cluster {c.cluster_id} contains {len(c.doc_ids)} documents",
-                    confidence=0.90,
+            if doc_vec is None or assigned_category not in category_index:
+                final_results[doc_id] = ClassificationResult(
+                    category="unclassified", tags=scored_tags, confidence=0.0,
+                    status="unclassified", reasoning="缺少文档向量或分类名未成功归一化",
                 )
-                cluster_db_id_map[c.cluster_id] = db_cid
+                continue
 
-        # 5.2 保存文档级分类、标签绑定与数学点积置信度
-        for did, match in match_results.items():
-            cid = doc_cluster_map.get(did)
-            cluster_obj = cluster_obj_map.get(cid) if cid is not None else None
-            db_cid = cluster_db_id_map.get(cid) if cid is not None else None
+            sims = np.clip(np.dot(category_matrix, doc_vec), 0.0, 1.0)
+            best_idx = int(np.argmax(sims))
+            assigned_idx = category_index[assigned_category]
+            assigned_sim = float(sims[assigned_idx])
+            best_sim = float(sims[best_idx])
 
-            # 数学公式算置信度：文档向量与所属簇质心向量的点积余弦相似度
-            if cluster_obj is not None and did in doc_vectors_map:
-                doc_vec = doc_vectors_map[did]
-                confidence = float(np.dot(doc_vec, cluster_obj.centroid_vector))
-                confidence = max(0.0, min(1.0, confidence))  # 截断在 0.0 ~ 1.0 之间
+            if best_idx == assigned_idx or (best_sim - assigned_sim) <= confidence_margin:
+                final_results[doc_id] = ClassificationResult(
+                    category=assigned_category, tags=scored_tags, confidence=assigned_sim,
+                    status="classified", reasoning=r["reasoning"],
+                )
             else:
-                confidence = 0.50
+                final_results[doc_id] = ClassificationResult(
+                    category="unclassified", tags=scored_tags, confidence=assigned_sim,
+                    status="unclassified",
+                    reasoning=(
+                        f"SLM 判定为「{assigned_category}」(点积 {assigned_sim:.2f})，"
+                        f"但「{canonical_categories[best_idx]}」点积更高 ({best_sim:.2f})，"
+                        "差距超过容差，判定不可信。"
+                    ),
+                )
 
-            # 模板化拼装零 LLM 消耗 Reasoning 推理理由
-            tags_str = ", ".join([f"{t[0]}({t[1]:.2f})" for t in match.matched_tags]) if match.matched_tags else "无"
-            reasoning = f"HDBSCAN 向量空间自动分簇 (簇 #{cid})。质心相似度: {confidence:.2f}。匹配标签: {tags_str}。"
+    # 内容过短 / SLM 解析失败的，统一判 unclassified
+    for doc_id in skipped_short:
+        final_results[doc_id] = ClassificationResult(
+            category="unclassified", tags=[], confidence=0.0,
+            status="unclassified", reasoning="文本内容过短，跳过 SLM 分类",
+        )
+    for doc_id in parse_failed:
+        final_results[doc_id] = ClassificationResult(
+            category="unclassified", tags=[], confidence=0.0,
+            status="unclassified", reasoning="SLM 输出 JSON 解析失败",
+        )
 
-            # 保存主分类、数据库 cluster_id、数学置信度与模板 Reasoning
+    # Stage⑤：持久化
+    print("[Step 5] 持久化写入 SQLite...", flush=True)
+    with index.connection:
+        for doc_id, result in final_results.items():
             index.save_classification(
-                document_id=did,
-                category_name=match.category,
-                tags=match.matched_tags,
-                confidence=confidence,
-                status="classified" if match.category != "未分类" else "unclassified",
-                reasoning=reasoning,
-                cluster_id=db_cid,
+                document_id=doc_id,
+                category_name=result.category,
+                tags=result.tags,
+                confidence=result.confidence,
+                status=result.status,
+                reasoning=result.reasoning,
             )
 
-            saved_count += 1
+    classified_count = sum(1 for r in final_results.values() if r.status == "classified")
+    unclassified_count = len(final_results) - classified_count
 
-    print(f"[Step 3.5] 持久化完成：{saved_count} 份文档写入 SQLite。", flush=True)
-    print(f"🎉 分类完成！共 {len(doc_vectors_map)} 份文档，{len(clusters)} 个簇，{saved_count} 份已分类。", flush=True)
+    print(
+        f"🎉 分类完成！共 {len(final_results)} 份，{classified_count} 份已分类，"
+        f"{unclassified_count} 份未归类。",
+        flush=True,
+    )
 
     return {
-        "total_documents": len(doc_vectors_map),
-        "clusters": len(clusters),
-        "outliers": len(outliers),
-        "tagged_documents": saved_count,
+        "total_documents": len(rows),
+        "classified_count": classified_count,
+        "unclassified_count": unclassified_count,
+        "skipped_short_count": len(skipped_short),
+        "parse_failed_count": len(parse_failed),
+        "canonical_categories": len(canonical_categories),
     }
-

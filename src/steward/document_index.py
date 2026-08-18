@@ -64,9 +64,7 @@ class DocumentIndex:
                 basic_type TEXT,
                 is_present INTEGER NOT NULL DEFAULT 1,
                 last_seen_run_id INTEGER,
-                cluster_id INTEGER,
-                FOREIGN KEY (last_seen_run_id) REFERENCES index_runs(id),
-                FOREIGN KEY (cluster_id) REFERENCES semantic_clusters(id) ON DELETE SET NULL
+                FOREIGN KEY (last_seen_run_id) REFERENCES index_runs(id)
             );
 
             CREATE TABLE IF NOT EXISTS extractions (
@@ -143,26 +141,8 @@ class DocumentIndex:
                 FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
                 FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
             );
-
-            /* Phase 3 算法簇解耦表：保存 HDBSCAN 发现的算法级聚类结构与 Tag Pool */
-            CREATE TABLE IF NOT EXISTS semantic_clusters (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                category_id INTEGER,
-                centroid_vector BLOB NOT NULL,
-                tag_pool_json TEXT NOT NULL,
-                summary TEXT,
-                confidence REAL NOT NULL,
-                created_at TEXT NOT NULL,
-                FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL
-            );
             """
         )
-
-        # 迁移：为 documents 表增加 cluster_id 字段 (外键关联 semantic_clusters)
-        try:
-            self.connection.execute("ALTER TABLE documents ADD COLUMN cluster_id INTEGER REFERENCES semantic_clusters(id)")
-        except sqlite3.OperationalError:
-            pass  # 如果 cluster_id 字段已存在，忽略错误
 
         self.connection.commit()
 
@@ -361,13 +341,10 @@ class DocumentIndex:
         return row["id"]
 
     def clear_classifications(self):
-        """清空旧有的分类、标签与算法簇历史数据，保证重新分类时无残存数据。"""
+        """清空旧有的分类与标签历史数据，保证重新分类时无残存数据。"""
         with self.connection:
-            # 必须最先解除 documents 对 semantic_clusters 的外键引用，否则 DELETE 会触发 FOREIGN KEY 约束报错！
-            self.connection.execute("UPDATE documents SET cluster_id = NULL;")
             self.connection.execute("DELETE FROM document_tags;")
             self.connection.execute("DELETE FROM document_classifications;")
-            self.connection.execute("DELETE FROM semantic_clusters;")
             self.connection.execute("DELETE FROM tags;")
             self.connection.execute("DELETE FROM categories;")
 
@@ -379,9 +356,8 @@ class DocumentIndex:
         confidence=0.9,
         status="classified",
         reasoning="",
-        cluster_id=None,
     ):
-        """保存或更新文档的主分类与标签关联，并同步更新 documents.cluster_id 外键。"""
+        """保存或更新文档的主分类与标签关联。"""
 
         category_id = self._get_or_create_category(category_name)
         now_str = _utc_now()
@@ -391,12 +367,6 @@ class DocumentIndex:
         # __exit__ 会自动触发 rollback() 回滚所有删除与修改，防止产生数据半删半留的悬空状态；
         # 若正常执行结束，会自动触发 commit() 提交修改。
         with self.connection:
-            if cluster_id is not None:
-                self.connection.execute(
-                    "UPDATE documents SET cluster_id = ? WHERE id = ?",
-                    (cluster_id, document_id),
-                )
-
             # 防坑点 2：使用 ON CONFLICT DO UPDATE (Upsert) 而非 INSERT OR REPLACE。
             # INSERT OR REPLACE 的底层物理动作是先物理删除旧行再插入新行（会导致自增 ID 发生变动/抖动，破坏外键引用）。
             # ON CONFLICT DO UPDATE 可以在保留原始主键 id 不变的前提下，在原位置做原地覆盖更新。
@@ -530,26 +500,4 @@ class DocumentIndex:
         ).fetchone()
         return row["id"]
 
-    def save_semantic_cluster(
-        self,
-        category_id: int,
-        centroid_vector: np.ndarray,
-        tag_pool: list[str],
-        summary: str = "",
-        confidence: float = 0.90,
-    ) -> int:
-        """保存 HDBSCAN 算法层产生的解耦语义簇 (semantic_cluster)，返回 cluster_id。"""
-        now_str = _utc_now()
-        vector_blob = centroid_vector.astype(np.float32).tobytes()
-        tag_pool_json = json.dumps(tag_pool, ensure_ascii=False)
-
-        cursor = self.connection.execute(
-            """
-            INSERT INTO semantic_clusters
-                (category_id, centroid_vector, tag_pool_json, summary, confidence, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (category_id, vector_blob, tag_pool_json, summary, confidence, now_str),
-        )
-        return cursor.lastrowid
 

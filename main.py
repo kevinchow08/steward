@@ -124,26 +124,29 @@ def run_search(query, db_path, top_k):
     print(f"搜索总耗时:   {total_seconds:.3f} 秒")
 
 
-def run_classify(db_path):
-    """为已有索引文本的文档批量执行 100% 动态无监督分类与多标签打标，并将结果持久化。"""
+def run_classify(db_path, max_workers=8):
+    """为已有索引文本的文档批量执行逐文件动态分类与多标签打标，并将结果持久化。"""
 
     import time
     from steward.document_index import DocumentIndex
     from steward.semantic_classifier import run_dynamic_classification_pipeline
 
-    print("🚀 启动 Phase 3 端到端 100% 动态无规则分类与多标签打标引擎...")
+    print("🚀 启动 V2 逐文件动态分类与打标签引擎...")
     start_time = time.monotonic()
 
     with DocumentIndex(db_path) as index:
-        stats = run_dynamic_classification_pipeline(index=index)
+        stats = run_dynamic_classification_pipeline(index=index, max_workers=max_workers)
 
     elapsed = time.monotonic() - start_time
 
     print("-" * 50)
-    print("【100% 动态无监督分类与打标签统计】")
+    print("【逐文件动态分类与打标签统计】")
     print(f"分析文档总数: {stats['total_documents']} 份")
-    print(f"聚类发现簇数: {stats['clusters']} 个主题簇 (离群孤立文件: {stats['outliers']} 份)")
-    print(f"成功打标文件: {stats['tagged_documents']} 份")
+    print(f"内容过短跳过: {stats['skipped_short_count']} 份")
+    print(f"SLM 解析失败: {stats['parse_failed_count']} 份")
+    print(f"已归一化分类数: {stats['canonical_categories']} 个")
+    print(f"成功分类: {stats['classified_count']} 份")
+    print(f"未归类 (unclassified): {stats['unclassified_count']} 份")
     print(f"全管线总耗时: {elapsed:.3f} 秒")
     print(f"数据库持久化: {db_path}")
 
@@ -223,6 +226,12 @@ def main():
         default=DEFAULT_DB_PATH,
         help=f"SQLite 数据库路径，默认是 {DEFAULT_DB_PATH}",
     )
+    classify_parser.add_argument(
+        "--workers",
+        type=int,
+        default=8,
+        help="并发调用本地 SLM 的线程数，建议跟 llama-server 启动时的 -np（slot 数）匹配，默认 8",
+    )
 
     tags_parser = subparsers.add_parser("tags", help="展示数据库中已分类文档的主分类、置信度及标签列表")
     tags_parser.add_argument(
@@ -239,7 +248,7 @@ def main():
     elif args.command == "search":
         run_search(args.query, args.db, args.top_k)
     elif args.command == "classify":
-        run_classify(args.db)
+        run_classify(args.db, max_workers=args.workers)
     elif args.command == "tags":
         run_tags(args.db)
     else:
