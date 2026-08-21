@@ -41,21 +41,31 @@ def build_index(target_dir, embedder, db_path=DEFAULT_DB_PATH):
         for file_path in scan.iter_files(target_dir):
             stats["scanned_files"] += 1
 
-            # 当前提取器只处理已支持的后缀；其他文件不写入内容索引，
-            # 但仍计入报告，避免把“没有处理”误认为“处理成功”。
-            if Path(file_path).suffix.lower() not in SUPPORTED_EXTENSIONS:
-                stats["unsupported_files"] += 1
-                monitor.sample()
-                continue
+            # 提取+分段+向量化几百个文件本身需要真实的几分钟，中途没有任何输出的话
+            # 很容易被误认为卡死了（之前真实遇到过）。每处理 25 个文件报一次数，
+            # 让人能看出它还在正常往前走。
+            if stats["scanned_files"] % 25 == 0:
+                print(f"  已扫描 {stats['scanned_files']} 个文件...", flush=True)
 
-            # 只有确定要进入内容索引的文件，才需要调用 Week 1 分类器，
-            # 用它提供 basic_type 元数据。
+            # 每个扫描到的文件都先登记进 documents 表，带上 Week 1 判断出的 basic_type——
+            # 这一步以前放在"是否支持提取"判断之后，导致图片/视频/代码/压缩包这些不支持
+            # 内容提取的文件压根没有被写进数据库，后续任何环节（打标签、报告）都看不到
+            # 它们存在过，是"安静地遗漏"，不是"明确地跳过"。现在两者分开：登记文件是否
+            # 存在、属于什么基础类型，谁都不落下；提取/分段/向量化才是只对支持的格式做。
             result = rule_based.classify_file(file_path, rules)
             document_id = index.upsert_document(
                 file_path,
                 result["basic_type"],
                 run_id=run_id,
             )
+
+            # 当前提取器只处理已支持的后缀；其他文件不写入内容索引（没有正文可提取），
+            # 但仍计入报告，避免把"没有处理"误认为"处理成功"。
+            if Path(file_path).suffix.lower() not in SUPPORTED_EXTENSIONS:
+                stats["unsupported_files"] += 1
+                monitor.sample()
+                continue
+
             extraction = extract_text(file_path)
 
             chunks = chunk_text(extraction.text)

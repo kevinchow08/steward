@@ -1,4 +1,4 @@
-"""入口:接收目录参数,串联 scan -> classify -> monitor -> report。"""
+"""入口:接收目录参数,串联 scan -> index -> tag -> report。"""
 
 import argparse
 import sys
@@ -124,14 +124,14 @@ def run_search(query, db_path, top_k):
     print(f"搜索总耗时:   {total_seconds:.3f} 秒")
 
 
-def run_classify(db_path, max_workers=8):
-    """为已有索引文本的文档批量执行逐文件动态分类与多标签打标，并将结果持久化。"""
+def run_tag(db_path, max_workers=8):
+    """为已有索引文本的文档批量执行逐文件打标签（附带一个内部参考用的分类），并持久化。"""
 
     import time
     from steward.document_index import DocumentIndex
     from steward.semantic_classifier import run_dynamic_classification_pipeline
 
-    print("🚀 启动 V2 逐文件动态分类与打标签引擎...")
+    print("🚀 启动 V2 逐文件打标签引擎...")
     start_time = time.monotonic()
 
     with DocumentIndex(db_path) as index:
@@ -140,12 +140,13 @@ def run_classify(db_path, max_workers=8):
     elapsed = time.monotonic() - start_time
 
     print("-" * 50)
-    print("【逐文件动态分类与打标签统计】")
+    print("【逐文件打标签统计】")
     print(f"分析文档总数: {stats['total_documents']} 份")
     print(f"内容过短跳过: {stats['skipped_short_count']} 份")
     print(f"SLM 解析失败: {stats['parse_failed_count']} 份")
-    print(f"已归一化分类数: {stats['canonical_categories']} 个")
-    print(f"成功分类: {stats['classified_count']} 份")
+    print(f"内部参考分类数: {stats['canonical_categories']} 个（不对外展示，仅供检索/归档参考）")
+    print(f"深度打标签: {stats['classified_count']} 份")
+    print(f"基础类型识别（非文档类型/未成功提取文本）: {stats['basic_count']} 份")
     print(f"未归类 (unclassified): {stats['unclassified_count']} 份")
     print(f"全管线总耗时: {elapsed:.3f} 秒")
     print(f"数据库持久化: {db_path}")
@@ -153,7 +154,7 @@ def run_classify(db_path, max_workers=8):
 
 
 def run_tags(db_path):
-    """展示 SQLite 中已分类文档的主分类、置信度及关联标签列表，并输出到文件。"""
+    """展示 SQLite 中已打标签文档的标签、参考分类及置信度，并输出到文件。"""
 
     from steward.document_index import DocumentIndex
 
@@ -161,25 +162,34 @@ def run_tags(db_path):
         records = list(index.iter_classifications())
 
     if not records:
-        print("当前没有任何已分类打标的文档。请先运行: python main.py classify")
+        print("当前没有任何已打标签的文档。请先运行: python main.py tag")
         return
-
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     report_path = OUTPUT_DIR / "tags_report.md"
 
-    print(f"共查找到 {len(records)} 份已分类文档。正在生成报告...")
+    # 三种状态分开统计，报告里也分开展示——"深度打标签"和"基础类型识别"的可信程度
+    # 不一样，混在一起看容易把后者的粗糙标签误当成前者那种经过语义判断的结果。
+    status_icon = {"classified": "✅", "basic": "🔹", "unclassified": "⚠️"}
+    status_label = {"classified": "深度打标签", "basic": "基础类型识别", "unclassified": "未归类"}
+    counts = {}
+    for r in records:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+
+    print(f"共查找到 {len(records)} 份文档。正在生成报告...")
 
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# 文档分类与标签报告\n\n")
-        f.write(f"**总计**: {len(records)} 份文档\n\n")
+        f.write("# 文档打标签报告\n\n")
+        f.write(f"**总计**: {len(records)} 份文档")
+        f.write("（" + "，".join(f"{status_label.get(s, s)} {n} 份" for s, n in counts.items()) + "）\n\n")
         for index, r in enumerate(records, start=1):
             tags_str = ", ".join(r["tags"]) if r["tags"] else "(无标签)"
-            status_flag = "✅" if r["status"] == "classified" else "⚠️"
-            f.write(f"### {index}. {status_flag} 分类: [{r['category']}]\n")
+            icon = status_icon.get(r["status"], "❔")
+            f.write(f"### {index}. {icon} {status_label.get(r['status'], r['status'])}\n")
+            f.write(f"- **标签**: {tags_str}\n")
+            f.write(f"- **参考分类**: [{r['category']}]（内部参考，非精确分类）\n")
             f.write(f"- **置信度**: {r['confidence']:.2f}\n")
             f.write(f"- **文件**: `{r['path']}`\n")
-            f.write(f"- **标签**: {tags_str}\n")
             f.write(f"- **依据**: {r['reasoning']}\n\n")
 
     print(f"✅ 报告已生成: {report_path}")
@@ -188,7 +198,7 @@ def run_tags(db_path):
 def main():
     # 保留 Week 1 的旧用法：python main.py ~/Downloads
     # 新功能使用子命令：python main.py index ~/Documents
-    if len(sys.argv) > 1 and sys.argv[1] not in {"index", "search", "classify", "tags", "-h", "--help"}:
+    if len(sys.argv) > 1 and sys.argv[1] not in {"index", "search", "tag", "tags", "-h", "--help"}:
         run_week1_scan(sys.argv[1])
         return
 
@@ -219,21 +229,21 @@ def main():
         help="返回结果数量，默认 5",
     )
 
-    classify_parser = subparsers.add_parser("classify", help="对已有索引的 document 批量执行语义分类与打标签")
-    classify_parser.add_argument(
+    tag_parser = subparsers.add_parser("tag", help="对已有索引的文档批量打标签（附带一个内部参考分类）")
+    tag_parser.add_argument(
         "--db",
         type=Path,
         default=DEFAULT_DB_PATH,
         help=f"SQLite 数据库路径，默认是 {DEFAULT_DB_PATH}",
     )
-    classify_parser.add_argument(
+    tag_parser.add_argument(
         "--workers",
         type=int,
         default=8,
         help="并发调用本地 SLM 的线程数，建议跟 llama-server 启动时的 -np（slot 数）匹配，默认 8",
     )
 
-    tags_parser = subparsers.add_parser("tags", help="展示数据库中已分类文档的主分类、置信度及标签列表")
+    tags_parser = subparsers.add_parser("tags", help="展示数据库中已打标签文档的标签、参考分类及置信度")
     tags_parser.add_argument(
         "--db",
         type=Path,
@@ -247,8 +257,8 @@ def main():
         run_index(args.target_dir, args.db)
     elif args.command == "search":
         run_search(args.query, args.db, args.top_k)
-    elif args.command == "classify":
-        run_classify(args.db, max_workers=args.workers)
+    elif args.command == "tag":
+        run_tag(args.db, max_workers=args.workers)
     elif args.command == "tags":
         run_tags(args.db)
     else:

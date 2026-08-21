@@ -5,9 +5,15 @@
 向量化代码不需要知道原文件是 PDF 还是 DOCX。
 """
 
+import concurrent.futures
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
+
+
+# 单个文件提取的超时时间。个别下载损坏的文件（比如把 HTTP 错误响应存成了 .pdf）
+# 会让 pypdf 的容错解析陷入极慢的恢复尝试，不设超时的话可能拖住整批索引。
+EXTRACTION_TIMEOUT_SECONDS = 30
 
 
 @dataclass
@@ -54,6 +60,19 @@ SUPPORTED_EXTENSIONS = {
 }
 
 
+def _dispatch_extract(suffix, path):
+    """按后缀分发到对应的提取函数，返回 (text, extractor_name)。"""
+
+    if suffix == ".pdf":
+        return _extract_pdf(path), "pypdf"
+    elif suffix == ".docx":
+        return _extract_docx(path), "python-docx"
+    elif suffix in {".html", ".htm"}:
+        return _extract_html(path), "beautifulsoup4"
+    else:
+        return _extract_plain_text(path), "python-text"
+
+
 def extract_text(file_path):
     """提取一个文件的纯文本，并返回统一的 ExtractionResult。
 
@@ -71,24 +90,31 @@ def extract_text(file_path):
             error=f"暂不支持的文件格式: {suffix or '(无扩展名)'}",
         )
 
+    # 提取放到独立线程里跑，主线程用 future.result(timeout=...) 掐表等。
+    # 注意：这里故意每次新建一个只有 1 个 worker 的 executor，而不是复用一个共享池——
+    # 万一某份文件真的卡死不返回，我们只是不再等它（shutdown(wait=False)，不阻塞退出），
+    # 那个卡住的线程会变成孤儿线程留在后台，但不会占用下一份文件要用的 worker 名额。
+    # 如果复用一个固定大小的共享池，一旦某个 worker 被卡死的任务占住，就永久少了一条
+    # 处理后续文件的产能，只有重启进程才能恢复。
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(_dispatch_extract, suffix, path)
     try:
-        if suffix == ".pdf":
-            text = _extract_pdf(path)
-            extractor = "pypdf"
-        elif suffix == ".docx":
-            text = _extract_docx(path)
-            extractor = "python-docx"
-        elif suffix in {".html", ".htm"}:
-            text = _extract_html(path)
-            extractor = "beautifulsoup4"
-        else:
-            text = _extract_plain_text(path)
-            extractor = "python-text"
-    except Exception as exc:  # 单文件异常转为记录，不阻塞整批索引
+        text, extractor = future.result(timeout=EXTRACTION_TIMEOUT_SECONDS)
+        executor.shutdown(wait=False)
+    except concurrent.futures.TimeoutError:
+        executor.shutdown(wait=False)
         return ExtractionResult(
             path=str(path),
             status="error",
-            extractor=extractor if "extractor" in locals() else None,
+            extractor=None,
+            error=f"提取超时（超过 {EXTRACTION_TIMEOUT_SECONDS} 秒），文件可能已损坏",
+        )
+    except Exception as exc:  # 单文件异常转为记录，不阻塞整批索引
+        executor.shutdown(wait=False)
+        return ExtractionResult(
+            path=str(path),
+            status="error",
+            extractor=None,
             error=f"{type(exc).__name__}: {exc}",
         )
 
