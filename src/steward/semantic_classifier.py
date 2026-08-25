@@ -7,32 +7,36 @@ Cluster-then-Label 设计已废弃，为什么废弃、V2 具体怎么设计，�
 docs/dynamic_classification_architecture.md，这里只放实现）。
 
 图片/视频/代码/压缩包等非文档类型、以及提取失败的文件，不进入下面这条 SLM 语义
-判断的管线，只在最后补一道基础类型标签（见 Stage②-basic），不是被忽略。
+判断的管线，只在最后补一道基础类型标签（见 Stage⑥），不是被忽略。
 
-四阶段管线：
+管线（曾经有一版"先看文件夹名字+文件名列表判断整体连贯性，猜对了就跳过内容分析"
+的分支，已经彻底撤掉——反复用真实数据验证下来，不读内容纯猜连贯性这件事本身
+不可靠：文件夹名字信息量不够会猜错，多层嵌套的文件夹（一门课分好几层子章节）
+因为每层单独看文件数都不够门槛，会被拆散成互不相关的好几类，属于系统性风险，
+不是靠调参数能修的。现在每一份文件都真实读取内容独立判断，代价是 SLM 调用量
+变大，换来的是不再有"完全没读内容就下结论"这种风险）：
   ① 内容量预筛 —— 文本过短/无信息量，直接判 unclassified，不调用 SLM
-  ② 分两条路：
-     - 大文件夹先判断整体连贯性——只看文件夹名字+文件名列表（不读内容），一次调用
-       判断这个文件夹是不是一门课程/一个项目这种"一件事"，命名规律（统一编号+标题
-       格式）是依据，不要求内部每个文件话题完全一致。判定连贯：整个文件夹直接沿用
-       这一次判断的结果，不再逐个调用 SLM。（最早试过"抽样几个文件独立判断，看
-       判断结果收不收敛"，实测会被文件夹内部正常的话题差异误判成不连贯——同一门
-       课程里前端/后端/DevOps 课时话题本来就不一样——所以改成直接问文件夹本身）
-     - 判定不连贯 / 文件数不够多的文件夹：逐文件独立调用 SLM，产出各自的
-       category + tags + reasoning，互不知道彼此的判断。
-     用户真正要的是"整理一个指定目录"，不完全等于"给每个文件独立发现语义"——
-     目录里已经有的结构本身是一份强先验，该直接利用，不是每次都当作不存在。
-     之前试过给逐文件判断加"已用分类名，优先复用"的收敛压力，两份不同语料上都
-     测出来会让内容被硬塞进不相关的已有分类，代价不可接受，已经撤掉——这次的
-     文件夹整体判断不一样，没有对任何一次判断施加压力，只是换了一个更合适的
-     判断对象（文件夹本身，不是拿逐文件判断结果反推）
-  ③ Taxonomy 归一化 —— 合并同义分类名（对象是分类名字符串，不涉及向量），
-     只是缓解分类名数量偏多这个"不够整洁"的问题，不承担保证判断准确的责任
-  ④ 置信度计算 —— 文档向量跟分类名/标签向量做点积，作为参考信息存下来；
+  ② 逐文件独立判断 —— 每份文件都基于真实内容独立调用一次 SLM，产出各自的
+     category + tags + reasoning，互不知道彼此的判断。之前试过给这一步加
+     "已用分类名，优先复用"的收敛压力，两份不同语料上都测出来会让内容被硬塞
+     进不相关的已有分类，代价不可接受，已经撤掉，保持完全独立判断。
+  ③ 同文件夹内标签统一 —— 每份文件都是基于真实内容独立判断出来的，但同一个
+     文件夹里的文件，判断结果可能只是措辞不同、说的是同一件事。按文件夹分组，
+     复用 Stage④ taxonomy 归一化的同一套安全网机制（向量粗筛+LLM核实+代码按
+     数量选标准名），只是把范围从"全库"缩小到"同一个文件夹内"——像才合并，
+     不像的（文件夹本来就是散装的）不强行合并。这一步不区分文件夹嵌套了几层，
+     判断范围永远是"文件"和它的"直接父目录"这两级，不需要判断该在哪一层看，
+     嵌套多深都一样处理。
+  ④ Taxonomy 归一化 —— 在全库范围再合并一次同义分类名（对象是分类名字符串，
+     不涉及向量），只是缓解分类名数量偏多这个"不够整洁"的问题，不承担保证
+     判断准确的责任
+  ⑤ 置信度计算 —— 文档向量跟分类名/标签向量做点积，作为参考信息存下来；
      实测过"跟候选池里所有分类名比排名，不是第一就打回 unclassified"这道复核，
      候选分类名一多（30+）就会被近义词的噪声大量误伤，已经撤掉，直接信 Stage②
      里 SLM 自己的判断（这个判断本身已经用真实案例验证过是可靠的）
-  ⑤ 持久化到 SQLite
+  ⑥ 非文档类型基础标签 —— 图片/视频/代码/压缩包等不进入上面语义判断的文件，
+     用 Week 1 已经算好的 basic_type 补一道浅层标签
+  ⑦ 持久化到 SQLite
 """
 
 import json
@@ -49,11 +53,6 @@ from openai import OpenAI
 
 # Stage①：内容去空白后短于这个字符数，直接判 unclassified，不调用 SLM
 MIN_CONTENT_LENGTH = 30
-
-# Stage②：文件夹至少有这么多文件，才值得判断"整体是不是一个连贯的东西"（太小的
-# 文件夹，直接逐文件判断也没几次调用，不用额外绕一道）。还没拿真实数据校准过，
-# 是合理起步值，不是拍死的常量。
-FOLDER_BATCH_MIN_SIZE = 8
 
 # 并发调用 SLM 的线程数。这是推理引擎侧的配置，需要跟 llama-server 启动时的
 # -np（slot 数）匹配，不要跟下面的分类逻辑耦合——后续要支持根据硬件自动探测时，
@@ -113,8 +112,16 @@ def _classify_one_document(client: OpenAI, model_name: str, path: str, full_text
     判断之间互相看得见——实测在两份完全不同的语料（整理过的 Documents、零散的 Downloads）
     上都验证过，这个做法会让模型为了凑到已有分类里，把明显不相关的内容硬塞进去（销售数据
     被归成"AI 模型评测报告"、英语学习进度被归成同一类），是拿准确性换分类数量好看，代价
-    不可接受，已经撤掉。分类名数量偏多（几十个）是一个"不够整洁"的问题，靠 Stage③ 的
+    不可接受，已经撤掉。分类名数量偏多（几十个）是一个"不够整洁"的问题，靠 Stage④ 的
     归一化去缓解；判断本身的准确性没有退路，独立判断是目前唯一验证过内容不会串味的方式。
+
+    JSON 字段顺序特意让 reasoning 排在 category/tags 前面：真实语料上发现过几例
+    category 跟 reasoning 完全对不上的案例（reasoning 明明写着"这是一份简历"，
+    category 却填了"教育课程"）——LLM 是从左到右逐 token 生成的，先写的内容没法
+    根据后面才写的内容调整，如果 schema 让模型先承诺 category、再补 reasoning，
+    下结论的时候论证过程还没写出来，容易脱节。换成"先写依据、再据此定分类"，
+    让 category 是在已经生成的 reasoning 文本基础上生成的，不需要多一次调用，
+    只是调整字段顺序。
     """
 
     filename = os.path.basename(path)
@@ -127,38 +134,45 @@ def _classify_one_document(client: OpenAI, model_name: str, path: str, full_text
     # 依赖前面全部 token 的上下文，前缀一旦分叉，后面就不再是"同一段计算"）。
     prompt = (
         "你是一个专业的端侧文件整理助手。请分析给定的文件，独立给出分类结论。\n\n"
-        "要求：category(2-4字宏观主分类)、tags(3-6个细粒度关键词)、reasoning(一句话依据)。\n"
+        "要求：先写 reasoning(一句话依据)，再基于这句依据给出 category(2-4字宏观主分类)，"
+        "最后给出 tags(3-6个细粒度关键词)。\n"
         "严格输出纯JSON，不要markdown标记：\n"
-        '{"category": "...", "tags": ["...", "..."], "reasoning": "..."}\n\n'
+        '{"reasoning": "...", "category": "...", "tags": ["...", "..."]}\n\n'
         "待分析的文件如下：\n"
         f"所在目录: {parent_dir}\n文件名: {filename}\n内容片段: {snippet}"
     )
 
-    try:
-        resp = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": "你是严格只返回JSON格式的文件分类助手。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-            max_tokens=200,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
-        content = resp.choices[0].message.content.strip()
-        start, end = content.find("{"), content.rfind("}")
-        if start == -1 or end == -1:
-            return None
-        parsed = json.loads(content[start:end + 1])
-        category = str(parsed.get("category", "")).strip()
-        tags = [str(t).strip() for t in parsed.get("tags", []) if str(t).strip()]
-        reasoning = str(parsed.get("reasoning", "")).strip()
-        if not category:
-            return None
-        return {"category": category, "tags": tags, "reasoning": reasoning}
-    except Exception as e:
-        print(f"  [Warning] 分类失败 {filename}: {e}", flush=True)
-        return None
+    # temperature=0.1 不是 0，偶尔会吐出格式有瑕疵的 JSON（真实验证过：同样的 prompt、
+    # 同样的参数，原样重新调用一次，大概率就正常了，不是内容本身有什么特殊之处触发的
+    # 结构性问题）。给 2 次机会，比因为一次采样抖动就把这份文件打成 unclassified 更划算。
+    last_error = None
+    for attempt in range(2):
+        try:
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": "你是严格只返回JSON格式的文件分类助手。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+                max_tokens=200,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
+            content = resp.choices[0].message.content.strip()
+            start, end = content.find("{"), content.rfind("}")
+            if start == -1 or end == -1:
+                raise ValueError("未找到 JSON")
+            parsed = json.loads(content[start:end + 1])
+            reasoning = str(parsed.get("reasoning", "")).strip()
+            category = str(parsed.get("category", "")).strip()
+            tags = [str(t).strip() for t in parsed.get("tags", []) if str(t).strip()]
+            if not category:
+                raise ValueError("category 为空")
+            return {"category": category, "tags": tags, "reasoning": reasoning}
+        except Exception as e:
+            last_error = e
+    print(f"  [Warning] 分类失败 {filename}（重试后仍失败）: {last_error}", flush=True)
+    return None
 
 
 # Stage③：分类名之间向量相似度超过这个值就认为是同义词，归为一组。
@@ -308,82 +322,6 @@ def _verify_and_name_group(
         return {c: c for c in group}
 
 
-# Stage②-a：判断一个大文件夹整体是不是一个连贯的整体时，最多把文件名列表喂给模型看
-# 多少个——文件名的命名规律（统一编号+标题格式）是判断依据，不需要看完全部文件名，
-# 列太多反而占用不必要的 token。
-FOLDER_VERDICT_MAX_FILENAMES = 30
-
-
-def _classify_folder(client: OpenAI, model_name: str, folder_name: str, filenames: List[str]) -> Optional[dict]:
-    """只根据文件夹名字 + 文件名列表，判断这个文件夹整体是不是一个连贯的整体（一门课程、
-    一个项目、一批同类型资料），不读取任何文件内容，一次调用覆盖整个文件夹，跟文件夹
-    里有多少个文件无关。
-
-    这跟"抽样几个文件，独立判断，看判断结果收不收敛"是两个不同的问题——后者拿"文件夹
-    内各文件具体话题一不一致"当信号，同一门课程里前端/后端/DevOps 话题本来就会不一样，
-    会被误判成不连贯（实测过，`Nest 通关秘籍` 这种典型的"一门课"就是这样被误判的）。
-    这次直接问"这个文件夹本身是不是一件事"，命名规律才是该看的信号，不是内部话题够不够
-    一致。返回 None 代表判定不连贯（或者判断失败），调用方应该老实退回逐文件独立判断。
-    """
-    shown = filenames[:FOLDER_VERDICT_MAX_FILENAMES]
-    name_list_str = "\n".join(f"- {n}" for n in shown)
-    more_note = (
-        f"\n（文件夹内共 {len(filenames)} 个文件，以上只列出前 {FOLDER_VERDICT_MAX_FILENAMES} 个）"
-        if len(filenames) > FOLDER_VERDICT_MAX_FILENAMES else ""
-    )
-
-    prompt = (
-        "你是一个专业的端侧文件整理助手。请只根据文件夹名字和里面的文件名列表判断，"
-        "不需要读取任何文件的实际内容。\n\n"
-        "判断标准：重点看文件名之间有没有统一的结构/命名规律（比如统一的编号+标题格式、"
-        "统一的日期前缀），这种结构性规律说明这些文件是同一门课程/同一个项目按顺序产出的，"
-        "才是真正的\"连贯\"——这种情况下不要求每个文件具体话题完全一致（比如一门技术课程，"
-        "有的课时讲前端、有的讲后端、有的讲部署，属于正常的同一件事的不同部分）。\n\n"
-        "不要仅仅因为几个文件的话题可以被笼统地归到同一个抽象大类下（比如\"都跟个人成长"
-        "有关\"、\"都是学习记录\"）就判定为连贯——如果文件名之间没有统一的结构/命名规律，"
-        "每个文件名描述的是各自独立的、具体的事件或话题（比如不同次聊天各自聊的完全不同"
-        "内容、互不相关的零散笔记），应该判定为不连贯，交给逐文件单独判断，不要牵强地找一个"
-        "笼统的主题把它们框在一起。\n\n"
-        "举例：\n"
-        "「1. xxx.md」「2. yyy.md」「3. zzz.md」这种统一编号格式 → 连贯，是一个系列/课程\n"
-        "「与Gemini聊xxx的话题.txt」「关于yyy的investment对话.txt」这种各自独立命名、"
-        "内容各不相同的零散记录 → 不连贯，即使都能笼统归为\"个人笔记/聊天记录\"\n\n"
-        f"文件夹名: {folder_name}\n"
-        f"文件名列表:\n{name_list_str}{more_note}\n\n"
-        "严格输出纯JSON，不要markdown标记：\n"
-        '{"is_coherent": true/false, "category": "2-4字分类名(is_coherent为true时必填)", '
-        '"tags": ["3-6个细粒度关键词(is_coherent为true时必填)"], "reasoning": "一句话依据"}'
-    )
-
-    try:
-        resp = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": "你是严格只返回JSON格式的文件夹整理助手。"},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.1,
-            max_tokens=200,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
-        content = resp.choices[0].message.content.strip()
-        start, end = content.find("{"), content.rfind("}")
-        if start == -1 or end == -1:
-            return None
-        parsed = json.loads(content[start:end + 1])
-        if not parsed.get("is_coherent"):
-            return None
-        category = str(parsed.get("category", "")).strip()
-        if not category:
-            return None
-        tags = [str(t).strip() for t in parsed.get("tags", []) if str(t).strip()]
-        reasoning = str(parsed.get("reasoning", "")).strip()
-        return {"category": category, "tags": tags, "reasoning": reasoning}
-    except Exception as e:
-        print(f"  [Warning] 文件夹整体判断失败 ({folder_name}): {e}", flush=True)
-        return None
-
-
 def run_dynamic_classification_pipeline(
     index,
     embedder=None,
@@ -392,7 +330,7 @@ def run_dynamic_classification_pipeline(
     max_workers: int = DEFAULT_MAX_WORKERS,
     min_content_length: int = MIN_CONTENT_LENGTH,
 ) -> dict:
-    """V2 端到端逐文件分类管线，见模块顶部的四阶段说明。"""
+    """V2 端到端逐文件分类管线，见模块顶部的分阶段说明。"""
 
     from steward.document_vectors import get_all_document_vectors
     from steward.embeddings import LocalEmbedder
@@ -426,38 +364,13 @@ def run_dynamic_classification_pipeline(
             to_classify.append(row)
     print(f"[Step 1] 内容过短跳过 {len(skipped_short)} 份，{len(to_classify)} 份进入 SLM 分类。", flush=True)
 
-    # Stage②-a：大文件夹整体连贯性判断。只看文件夹名字+文件名列表，不读任何文件内容，
-    # 一个文件夹一次调用就能判断完，跟文件夹里有多少个文件无关——文件夹本身是用户
-    # 已经整理好、起了名字的一个整体，不该被拆开当成一堆互不相干的文件重新发现一遍。
-    # 判定连贯：整个文件夹直接沿用这一次判断的 category + tag 候选池，不需要再对
-    # 里面的文件逐个独立调用 SLM。判定不连贯：老实退回逐文件独立判断，不强行合并。
-    folder_groups: Dict[str, list] = {}
-    for row in to_classify:
-        folder_groups.setdefault(os.path.dirname(row["path"]), []).append(row)
-
-    large_folders = {f: rs for f, rs in folder_groups.items() if len(rs) >= FOLDER_BATCH_MIN_SIZE}
-    folder_verdict: Dict[str, dict] = {}  # {folder: {"category":..., "tags":[...], "reasoning":...}}
-
-    if large_folders:
-        print(f"[Step 2] {len(large_folders)} 个文件夹文件数≥{FOLDER_BATCH_MIN_SIZE}，判断整体连贯性...", flush=True)
-        for folder, rs in large_folders.items():
-            filenames = [os.path.basename(row["path"]) for row in rs]
-            verdict = _classify_folder(client, llm_model, os.path.basename(folder), filenames)
-            if verdict:
-                folder_verdict[folder] = verdict
-                print(f"  [Step 2] 「{os.path.basename(folder)}」({len(rs)} 个文件) 判定连贯，归为「{verdict['category']}」", flush=True)
-
-    # Stage②-b：不在已判定连贯文件夹里的文件，走逐文件独立判断（跟之前完全一样）。
-    to_call = [row for row in to_classify if os.path.dirname(row["path"]) not in folder_verdict]
-    print(
-        f"[Step 2] {max_workers} 路并发调用 SLM（{len(to_call)} 份逐文件判断，"
-        f"{len(to_classify) - len(to_call)} 份沿用文件夹整体判断）...", flush=True
-    )
+    # Stage②：逐文件独立判断——每份文件都真实读取内容，互不参考彼此的判断。
+    print(f"[Step 2] {max_workers} 路并发调用 SLM（{len(to_classify)} 份逐文件独立判断）...", flush=True)
     raw_results: Dict[int, dict] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(_classify_one_document, client, llm_model, row["path"], row["full_text"]): row["document_id"]
-            for row in to_call
+            for row in to_classify
         }
         done = 0
         for future in as_completed(futures):
@@ -466,29 +379,48 @@ def run_dynamic_classification_pipeline(
             if result:
                 raw_results[doc_id] = result
             done += 1
-            if done % 50 == 0 or done == len(to_call):
-                print(f"  [Step 2] 已完成 {done}/{len(to_call)}", flush=True)
-
-    # Stage②-c：已判定连贯的文件夹，文件直接沿用文件夹整体判断的 category + tag 候选池。
-    # tags 是共享候选池，不是每个文件死板地拿到一模一样的标签——具体哪些标签打得上、
-    # 打多高的分，还是靠 Stage④ 里各自文档向量跟候选标签向量做点积决定，同一个候选池，
-    # 讲 React 的课时和讲数据库的课时天然会打出不一样的标签分数，不需要额外调用 SLM。
-    for row in to_classify:
-        if row["document_id"] in raw_results:
-            continue
-        verdict = folder_verdict.get(os.path.dirname(row["path"]))
-        if verdict:
-            raw_results[row["document_id"]] = {
-                "category": verdict["category"],
-                "tags": verdict["tags"],
-                "reasoning": f"文件夹「{os.path.basename(os.path.dirname(row['path']))}」整体判定：{verdict['reasoning']}",
-            }
+            if done % 50 == 0 or done == len(to_classify):
+                print(f"  [Step 2] 已完成 {done}/{len(to_classify)}", flush=True)
 
     parse_failed = [row["document_id"] for row in to_classify if row["document_id"] not in raw_results]
     print(f"[Step 2] 分类完成：{len(raw_results)} 份成功，{len(parse_failed)} 份解析失败。", flush=True)
 
-    # Stage③：Taxonomy 归一化（对象是分类名字符串，不涉及向量）
-    print("[Step 3] Taxonomy 归一化...", flush=True)
+    # Stage③：同文件夹内标签统一。每份文件的 category 都是基于真实内容独立判断出来的，
+    # 但同一个文件夹里的文件，判断结果可能只是措辞不同、说的是同一件事——按"直接父
+    # 目录"分组（不管这个目录嵌套了几层，判断范围永远是文件和它的直接父目录这两级），
+    # 复用 Stage④ taxonomy 归一化的同一套安全网（向量粗筛+LLM核实+代码按数量选标准名），
+    # 只是把范围从"全库"缩小到"同一个文件夹内"——像才合并，文件夹本来就是散装的
+    # 不会被强行合并。
+    print("[Step 3] 同文件夹内标签统一...", flush=True)
+    folder_groups: Dict[str, list] = {}
+    for row in to_classify:
+        if row["document_id"] in raw_results:
+            folder_groups.setdefault(os.path.dirname(row["path"]), []).append(row["document_id"])
+
+    folder_unify_count = 0
+    for doc_ids in folder_groups.values():
+        if len(doc_ids) < 2:
+            continue
+        folder_counts: Dict[str, int] = {}
+        for doc_id in doc_ids:
+            cat = raw_results[doc_id]["category"]
+            folder_counts[cat] = folder_counts.get(cat, 0) + 1
+        if len(folder_counts) < 2:
+            continue  # 这个文件夹里已经是同一个分类了，不用处理
+        canonical_map = _normalize_taxonomy(
+            sorted(folder_counts.keys()), client, llm_model, embedder, category_counts=folder_counts
+        )
+        for doc_id in doc_ids:
+            old_cat = raw_results[doc_id]["category"]
+            new_cat = canonical_map.get(old_cat, old_cat)
+            if new_cat != old_cat:
+                raw_results[doc_id]["category"] = new_cat
+                folder_unify_count += 1
+    print(f"[Step 3] {folder_unify_count} 份文件的分类因跟同文件夹内其他文件合并而调整。", flush=True)
+
+    # Stage④：Taxonomy 归一化（对象是分类名字符串，不涉及向量），这次是全库范围，
+    # 在 Stage③ 已经做过一轮文件夹内合并的基础上，再合并一次跨文件夹的同义分类名。
+    print("[Step 4] Taxonomy 归一化...", flush=True)
     category_counts: Dict[str, int] = {}
     for r in raw_results.values():
         category_counts[r["category"]] = category_counts.get(r["category"], 0) + 1
@@ -499,12 +431,12 @@ def run_dynamic_classification_pipeline(
     for r in raw_results.values():
         r["category"] = canonical_map.get(r["category"], r["category"])
     canonical_categories = sorted(set(canonical_map.values()))
-    print(f"[Step 3] {len(raw_categories)} 个原始分类名归一化为 {len(canonical_categories)} 个。", flush=True)
+    print(f"[Step 4] {len(raw_categories)} 个原始分类名归一化为 {len(canonical_categories)} 个。", flush=True)
 
-    # Stage④：置信度计算（category 和 tag 用同一套数学：文档向量分别跟候选文本的
+    # Stage⑤：置信度计算（category 和 tag 用同一套数学：文档向量分别跟候选文本的
     # 向量做点积）。这个分数只是存下来给人参考，不再用来推翻 Stage② 里 SLM 自己
     # 判定的分类——为什么不拿它去做"复核"，见上面模块顶部说明。
-    print("[Step 4] 计算文档向量与分类名/标签向量的点积置信度...", flush=True)
+    print("[Step 5] 计算文档向量与分类名/标签向量的点积置信度...", flush=True)
     doc_vectors_map = get_all_document_vectors(index)
     final_results: Dict[int, ClassificationResult] = {}
 
@@ -564,7 +496,7 @@ def run_dynamic_classification_pipeline(
             status="unclassified", reasoning="SLM 输出 JSON 解析失败",
         )
 
-    # Stage②-basic：非文档类型 / 没有成功提取过文本的文件（图片、视频、代码、压缩包……），
+    # Stage⑥：非文档类型 / 没有成功提取过文本的文件（图片、视频、代码、压缩包……），
     # 目前完全不在这条流水线的语义分析范围内。以前这批文件"安静地不出现"，容易被误以为
     # 是遗漏；这里显式给一个浅层结果——不调用 SLM，直接用 Week 1 已经算好的 basic_type
     # 生成一个基础标签，status 单独标成 "basic"，跟真正走过 SLM 语义判断的结果区分开，
@@ -588,10 +520,10 @@ def run_dynamic_classification_pipeline(
             reasoning="非文档类型或未成功提取文本，仅做基础类型识别，未做语义内容分析",
         )
     if basic_rows:
-        print(f"[Step 2-basic] {len(basic_rows)} 份非文档类型/提取失败的文件，完成基础标签。", flush=True)
+        print(f"[Step 6] {len(basic_rows)} 份非文档类型/提取失败的文件，完成基础标签。", flush=True)
 
-    # Stage⑤：持久化
-    print("[Step 5] 持久化写入 SQLite...", flush=True)
+    # Stage⑦：持久化
+    print("[Step 7] 持久化写入 SQLite...", flush=True)
     with index.connection:
         for doc_id, result in final_results.items():
             index.save_classification(
