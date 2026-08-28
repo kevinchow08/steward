@@ -108,20 +108,22 @@ class DocumentIndex:
                 FOREIGN KEY (model_id) REFERENCES embedding_models(id) ON DELETE CASCADE
             );
 
-            /* Week 3 新增：打标签引擎核心表结构。曾经还有一张 categories 表配合
-               document_tagging.category_id 维护一套分类体系（表名当时叫
-               document_classifications），V3 试了两周后被拿掉了——真实数据反复
-               证明"每份文件收敛到唯一分类"这个目标本身跟文件天然多归属、边界模糊
-               的性质冲突，具体过程见 docs/dynamic_classification_architecture.md。
-               现在这张表只存打标签结果（reasoning + 置信度 + 状态），不再关联分类，
-               表名和字段名也跟着改掉了，不留"classification"这种名不副实的痕迹。 */
+            /* Week 3 新增：打标签引擎核心表结构。这张表最早叫 document_classifications，
+               还配了一张 categories 表、一个 category_id 外键，维护一套分类体系，V3
+               试了两周后被拿掉了——真实数据反复证明"每份文件收敛到唯一分类"这个目标
+               本身跟文件天然多归属、边界模糊的性质冲突，具体过程见
+               docs/dynamic_classification_architecture.md。现在这张表只存打标签结果
+               （reasoning + 置信度 + 状态），不再关联分类，改名 tagging_results，不留
+               "classification"这种名不副实的痕迹；也跟下面 document_tags（文档↔标签
+               的多对多桥接表）区分开——那张表是"文档有哪些标签"，这张表是"这个文档打
+               标签这件事本身的元数据"，一对一，不是同一件事，别看名字像就以为能合并。 */
             CREATE TABLE IF NOT EXISTS tags (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS document_tagging (
+            CREATE TABLE IF NOT EXISTS tagging_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 document_id INTEGER NOT NULL UNIQUE,
                 confidence REAL NOT NULL,
@@ -363,7 +365,7 @@ class DocumentIndex:
         """清空旧有的打标签历史数据，保证重新打标签时无残存数据。"""
         with self.connection:
             self.connection.execute("DELETE FROM document_tags;")
-            self.connection.execute("DELETE FROM document_tagging;")
+            self.connection.execute("DELETE FROM tagging_results;")
             self.connection.execute("DELETE FROM tags;")
 
     def save_tagging_result(
@@ -388,7 +390,7 @@ class DocumentIndex:
             # ON CONFLICT DO UPDATE 可以在保留原始主键 id 不变的前提下，在原位置做原地覆盖更新。
             self.connection.execute(
                 """
-                INSERT INTO document_tagging
+                INSERT INTO tagging_results
                     (document_id, confidence, status, reasoning, created_at)
                 VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(document_id) DO UPDATE SET
@@ -443,7 +445,7 @@ class DocumentIndex:
                 dc.reasoning AS reasoning,
                 dc.created_at AS created_at
             FROM documents d
-            JOIN document_tagging dc ON dc.document_id = d.id
+            JOIN tagging_results dc ON dc.document_id = d.id
             WHERE d.is_present = 1
             ORDER BY dc.created_at DESC
             """
