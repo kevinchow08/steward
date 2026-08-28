@@ -70,6 +70,7 @@ def run_index(target_dir, db_path):
     stats = indexing.build_index(target_dir, embedder, db_path=db_path)
 
     print(f"扫描文件: {stats['scanned_files']}")
+    print(f"识别到代码项目: {stats['project_count']}（已整体登记，跳过其内部文件）")
     print(f"已建立索引: {stats['indexed_files']}")
     print(f"成功提取: {stats['success_files']}")
     print(f"无文字内容: {stats['no_text_files']}")
@@ -125,17 +126,27 @@ def run_search(query, db_path, top_k):
 
 
 def run_tag(db_path, max_workers=8):
-    """为已有索引文本的文档批量执行逐文件打标签（附带一个内部参考用的分类），并持久化。"""
+    """为已有索引文本的文档批量执行打标签（开放式 reasoning + tags，不维护分类体系），并持久化。
+
+    这个函数以前还接受 structural_base_url/structural_model 两个参数，是给 V3
+    "taxonomy 归纳"那一步单独指定一个更大模型用的。V3 整套分类体系已经拿掉（见
+    docs/dynamic_classification_architecture.md 的"V3 复盘"），现在只剩一种任务
+    （逐文件打标签），不再需要区分"抽象归纳"和"具体判断"两种模型，这两个参数
+    跟着一起删掉了。
+    """
 
     import time
     from steward.document_index import DocumentIndex
-    from steward.semantic_classifier import run_dynamic_classification_pipeline
+    from steward.tagging import run_tagging_pipeline
 
-    print("🚀 启动 V2 逐文件打标签引擎...")
+    print("🚀 启动打标签引擎（开放式 reasoning + tags）...")
     start_time = time.monotonic()
 
     with DocumentIndex(db_path) as index:
-        stats = run_dynamic_classification_pipeline(index=index, max_workers=max_workers)
+        stats = run_tagging_pipeline(
+            index=index,
+            max_workers=max_workers,
+        )
 
     elapsed = time.monotonic() - start_time
 
@@ -144,22 +155,23 @@ def run_tag(db_path, max_workers=8):
     print(f"分析文档总数: {stats['total_documents']} 份")
     print(f"内容过短跳过: {stats['skipped_short_count']} 份")
     print(f"SLM 解析失败: {stats['parse_failed_count']} 份")
-    print(f"内部参考分类数: {stats['canonical_categories']} 个（不对外展示，仅供检索/归档参考）")
-    print(f"深度打标签: {stats['classified_count']} 份")
+    print(f"深度打标签: {stats['tagged_count']} 份")
     print(f"基础类型识别（非文档类型/未成功提取文本）: {stats['basic_count']} 份")
-    print(f"未归类 (unclassified): {stats['unclassified_count']} 份")
+    print(f"未打标签 (untagged): {stats['untagged_count']} 份")
+    print(f"代码项目: {stats['project_count']} 个（{stats['project_tagged_count']} 个已打标签，"
+          f"{stats['project_failed_count']} 个失败）")
     print(f"全管线总耗时: {elapsed:.3f} 秒")
     print(f"数据库持久化: {db_path}")
 
 
 
 def run_tags(db_path):
-    """展示 SQLite 中已打标签文档的标签、参考分类及置信度，并输出到文件。"""
+    """展示 SQLite 中已打标签文档的标签、reasoning 及置信度，并输出到文件。"""
 
     from steward.document_index import DocumentIndex
 
     with DocumentIndex(db_path) as index:
-        records = list(index.iter_classifications())
+        records = list(index.iter_tagging_results())
 
     if not records:
         print("当前没有任何已打标签的文档。请先运行: python main.py tag")
@@ -170,8 +182,8 @@ def run_tags(db_path):
 
     # 三种状态分开统计，报告里也分开展示——"深度打标签"和"基础类型识别"的可信程度
     # 不一样，混在一起看容易把后者的粗糙标签误当成前者那种经过语义判断的结果。
-    status_icon = {"classified": "✅", "basic": "🔹", "unclassified": "⚠️"}
-    status_label = {"classified": "深度打标签", "basic": "基础类型识别", "unclassified": "未归类"}
+    status_icon = {"tagged": "✅", "basic": "🔹", "untagged": "⚠️"}
+    status_label = {"tagged": "深度打标签", "basic": "基础类型识别", "untagged": "未打标签"}
     counts = {}
     for r in records:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
@@ -187,7 +199,6 @@ def run_tags(db_path):
             icon = status_icon.get(r["status"], "❔")
             f.write(f"### {index}. {icon} {status_label.get(r['status'], r['status'])}\n")
             f.write(f"- **标签**: {tags_str}\n")
-            f.write(f"- **参考分类**: [{r['category']}]（内部参考，非精确分类）\n")
             f.write(f"- **置信度**: {r['confidence']:.2f}\n")
             f.write(f"- **文件**: `{r['path']}`\n")
             f.write(f"- **依据**: {r['reasoning']}\n\n")
@@ -229,7 +240,7 @@ def main():
         help="返回结果数量，默认 5",
     )
 
-    tag_parser = subparsers.add_parser("tag", help="对已有索引的文档批量打标签（附带一个内部参考分类）")
+    tag_parser = subparsers.add_parser("tag", help="对已有索引的文档批量打标签（开放式 reasoning + tags）")
     tag_parser.add_argument(
         "--db",
         type=Path,
@@ -243,7 +254,7 @@ def main():
         help="并发调用本地 SLM 的线程数，建议跟 llama-server 启动时的 -np（slot 数）匹配，默认 8",
     )
 
-    tags_parser = subparsers.add_parser("tags", help="展示数据库中已打标签文档的标签、参考分类及置信度")
+    tags_parser = subparsers.add_parser("tags", help="展示数据库中已打标签文档的标签、reasoning 及置信度")
     tags_parser.add_argument(
         "--db",
         type=Path,
@@ -258,7 +269,10 @@ def main():
     elif args.command == "search":
         run_search(args.query, args.db, args.top_k)
     elif args.command == "tag":
-        run_tag(args.db, max_workers=args.workers)
+        run_tag(
+            args.db,
+            max_workers=args.workers,
+        )
     elif args.command == "tags":
         run_tags(args.db)
     else:

@@ -33,12 +33,25 @@ def build_index(target_dir, embedder, db_path=DEFAULT_DB_PATH):
         "error_files": 0,
         "unsupported_files": 0,
         "chunk_count": 0,
+        "project_count": 0,
     }
 
     with DocumentIndex(db_path) as index:
         run_id = index.start_run(embedder.info)
 
-        for file_path in scan.iter_files(target_dir):
+        # 代码项目根目录（.git/package.json/pyproject.toml 等标记文件命中的目录）
+        # 整体登记成一个"项目"单位，不再逐个源码文件走文档分类那条路——项目内部
+        # 动辄成千上万个依赖/构建产物文件，拆开当文档处理既不现实也不准确。
+        project_roots = scan.find_project_roots(target_dir)
+        for project_root in project_roots:
+            summary = scan.read_project_summary(project_root)
+            document_id = index.upsert_document(project_root, "project", run_id=run_id)
+            index.save_project_extraction(document_id, summary)
+            stats["project_count"] += 1
+        if project_roots:
+            print(f"  识别到 {len(project_roots)} 个代码项目，已整体登记，跳过其内部文件。", flush=True)
+
+        for file_path in scan.iter_files(target_dir, skip_dirs=project_roots):
             stats["scanned_files"] += 1
 
             # 提取+分段+向量化几百个文件本身需要真实的几分钟，中途没有任何输出的话

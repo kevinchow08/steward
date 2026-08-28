@@ -108,29 +108,27 @@ class DocumentIndex:
                 FOREIGN KEY (model_id) REFERENCES embedding_models(id) ON DELETE CASCADE
             );
 
-            /* Week 3 新增：分类与打标签引擎核心表结构 */
-            CREATE TABLE IF NOT EXISTS categories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
-                created_at TEXT NOT NULL
-            );
-
+            /* Week 3 新增：打标签引擎核心表结构。曾经还有一张 categories 表配合
+               document_tagging.category_id 维护一套分类体系（表名当时叫
+               document_classifications），V3 试了两周后被拿掉了——真实数据反复
+               证明"每份文件收敛到唯一分类"这个目标本身跟文件天然多归属、边界模糊
+               的性质冲突，具体过程见 docs/dynamic_classification_architecture.md。
+               现在这张表只存打标签结果（reasoning + 置信度 + 状态），不再关联分类，
+               表名和字段名也跟着改掉了，不留"classification"这种名不副实的痕迹。 */
             CREATE TABLE IF NOT EXISTS tags (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS document_classifications (
+            CREATE TABLE IF NOT EXISTS document_tagging (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 document_id INTEGER NOT NULL UNIQUE,
-                category_id INTEGER NOT NULL,
                 confidence REAL NOT NULL,
                 status TEXT NOT NULL,
                 reasoning TEXT,
                 created_at TEXT NOT NULL,
-                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
-                FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+                FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
             );
 
             CREATE TABLE IF NOT EXISTS document_tags (
@@ -203,6 +201,27 @@ class DocumentIndex:
         ).fetchone()
         self.connection.commit()
         return row["id"]
+
+    def save_project_extraction(self, document_id, full_text):
+        """保存一个"项目"单位（代码仓库根目录）的自描述内容（README/package.json 摘要拼接）。
+
+        项目不像文档那样需要切片+embedding（数量少，不用参与向量检索），只需要一份
+        "正文"落进 extractions 表，让它能走现有的 tag 报告展示逻辑，不用新建表。
+        """
+        with self.connection:
+            self.connection.execute(
+                "DELETE FROM extractions WHERE document_id = ?",
+                (document_id,),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO extractions
+                    (document_id, extractor_name, status, error, full_text,
+                     char_count, created_at)
+                VALUES (?, ?, 'success', NULL, ?, ?, ?)
+                """,
+                (document_id, "project_readme", full_text, len(full_text), _utc_now()),
+            )
 
     def save_document_content(self, document_id, extraction, chunks, vectors, model_info):
         """保存一个文件的提取结果、chunk 和对应向量。
@@ -340,26 +359,23 @@ class DocumentIndex:
         ).fetchone()
         return row["id"]
 
-    def clear_classifications(self):
-        """清空旧有的分类与标签历史数据，保证重新分类时无残存数据。"""
+    def clear_tagging_results(self):
+        """清空旧有的打标签历史数据，保证重新打标签时无残存数据。"""
         with self.connection:
             self.connection.execute("DELETE FROM document_tags;")
-            self.connection.execute("DELETE FROM document_classifications;")
+            self.connection.execute("DELETE FROM document_tagging;")
             self.connection.execute("DELETE FROM tags;")
-            self.connection.execute("DELETE FROM categories;")
 
-    def save_classification(
+    def save_tagging_result(
         self,
         document_id,
-        category_name,
         tags=(),
         confidence=0.9,
-        status="classified",
+        status="tagged",
         reasoning="",
     ):
-        """保存或更新文档的主分类与标签关联。"""
+        """保存或更新文档的打标签结果（reasoning + 标签关联），不再关联分类。"""
 
-        category_id = self._get_or_create_category(category_name)
         now_str = _utc_now()
 
         # 防坑点 1：使用 with self.connection 开启 SQLite 原子事务！
@@ -372,17 +388,16 @@ class DocumentIndex:
             # ON CONFLICT DO UPDATE 可以在保留原始主键 id 不变的前提下，在原位置做原地覆盖更新。
             self.connection.execute(
                 """
-                INSERT INTO document_classifications
-                    (document_id, category_id, confidence, status, reasoning, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO document_tagging
+                    (document_id, confidence, status, reasoning, created_at)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(document_id) DO UPDATE SET
-                    category_id = excluded.category_id,
                     confidence = excluded.confidence,
                     status = excluded.status,
                     reasoning = excluded.reasoning,
                     created_at = excluded.created_at
                 """,
-                (document_id, category_id, confidence, status, reasoning, now_str),
+                (document_id, confidence, status, reasoning, now_str),
             )
 
             # 防坑点 3：多对多标签列表的“先删后加”策略。
@@ -414,8 +429,8 @@ class DocumentIndex:
                     (document_id, tag_id, tag_conf),
                 )
 
-    def iter_classifications(self):
-        """读取所有文档的主分类、状态、置信度及标签列表。"""
+    def iter_tagging_results(self):
+        """读取所有文档的打标签状态、置信度、reasoning 及标签列表。"""
 
         cursor = self.connection.execute(
             """
@@ -423,14 +438,12 @@ class DocumentIndex:
                 d.id AS document_id,
                 d.path AS path,
                 d.basic_type AS basic_type,
-                c.name AS category_name,
                 dc.confidence AS confidence,
                 dc.status AS status,
                 dc.reasoning AS reasoning,
                 dc.created_at AS created_at
             FROM documents d
-            JOIN document_classifications dc ON dc.document_id = d.id
-            JOIN categories c ON c.id = dc.category_id
+            JOIN document_tagging dc ON dc.document_id = d.id
             WHERE d.is_present = 1
             ORDER BY dc.created_at DESC
             """
@@ -456,31 +469,12 @@ class DocumentIndex:
                 "document_id": doc_id,
                 "path": row["path"],
                 "basic_type": row["basic_type"],
-                "category": row["category_name"],
                 "confidence": row["confidence"],
                 "status": row["status"],
                 "reasoning": row["reasoning"],
                 "tags": tags_list,
                 "created_at": row["created_at"],
             }
-
-    def _get_or_create_category(self, category_name):
-        """获取或创建主分类记录，返回 category_id。"""
-
-        category_name = category_name.strip() or "unclassified"
-        now_str = _utc_now()
-        self.connection.execute(
-            """
-            INSERT OR IGNORE INTO categories (name, created_at)
-            VALUES (?, ?)
-            """,
-            (category_name, now_str),
-        )
-        row = self.connection.execute(
-            "SELECT id FROM categories WHERE name = ?",
-            (category_name,),
-        ).fetchone()
-        return row["id"]
 
     def _get_or_create_tag(self, tag_name):
         """获取或创建标签字典记录，返回 tag_id。"""
