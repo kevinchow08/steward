@@ -5,3 +5,8 @@ python-docx
 beautifulsoup4
 numpy
 sentence-transformers
+openai
+httpx
+openpyxl
+xlrd
+olefile
