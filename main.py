@@ -13,7 +13,12 @@ sys.path.insert(0, str(BASE_DIR / "src"))
 RULES_PATH = BASE_DIR / "config" / "rules.yaml"
 PROJECT_ROOT = Path(__file__).resolve().parent
 OUTPUT_DIR = PROJECT_ROOT / "output"
-DEFAULT_DB_PATH = PROJECT_ROOT / "steward.db"
+
+# 之前这里自己又定义了一份 DEFAULT_DB_PATH（指向项目源码目录），跟
+# document_index.py 里的那份是两份独立的常量、值还不一样——改 document_index.py
+# 那边的默认路径完全不会影响这里，是真实的 bug，不是"两处保持一致就行"的
+# 重复定义。改成直接从 document_index 引用同一个常量，只有一个真正的来源。
+from steward.document_index import DEFAULT_DB_PATH  # noqa: E402
 
 
 def run_week1_scan(target_dir):
@@ -67,7 +72,14 @@ def run_index(target_dir, db_path):
 
     print("正在加载本地 embedding 模型，首次运行可能需要下载模型文件...")
     embedder = LocalEmbedder()
-    stats = indexing.build_index(target_dir, embedder, db_path=db_path)
+
+    try:
+        stats = indexing.build_index(target_dir, embedder, db_path=db_path)
+    except FileNotFoundError as e:
+        # 目标目录不可达（比如外置盘没连接）——不打印一堆 traceback 吓用户，
+        # 老实说清楚原因就够了。
+        print(f"❌ {e}")
+        return
 
     print(f"扫描文件: {stats['scanned_files']}")
     print(f"识别到代码项目: {stats['project_count']}（已整体登记，跳过其内部文件）")
@@ -76,6 +88,8 @@ def run_index(target_dir, db_path):
     print(f"无文字内容: {stats['no_text_files']}")
     print(f"提取失败: {stats['error_files']}")
     print(f"暂不支持: {stats['unsupported_files']}")
+    print(f"跳过未变化文件: {stats['skipped_unchanged_files']}（增量索引生效，内容没变不重新处理）")
+    print(f"标记为已消失: {stats['removed_files']}（这次没扫到，可能是删除/改名）")
     print(f"文本片段: {stats['chunk_count']}")
     print(f"索引耗时: {stats['elapsed_seconds']:.2f} 秒")
     print(f"数据库: {db_path}")

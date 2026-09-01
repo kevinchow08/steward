@@ -12,13 +12,31 @@ from pathlib import Path
 import numpy as np
 
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parents[2] / "steward.db"
+# 之前这里指向项目源码目录本身（.../steward/steward.db），是开发阶段图方便的写法，
+# 真要打包分发给用户就不对了——要么落在安装包内部（可能没有写权限，或者升级/卸载时
+# 被清空），不是一个适合"持续积累、跨目录/跨盘共享"的用户数据存储位置。改成 macOS
+# 标准的用户级应用数据目录，这样不管这次 index 的是 ~/Documents 还是某个外置盘，
+# 只要不手动传 --db，天然都会写进同一个共享数据库，不需要用户自己记着保持一致。
+# 这是 macOS 专属路径约定，以后要上 Windows/Linux 得换成对应平台的标准位置。
+DEFAULT_DB_PATH = Path.home() / "Library" / "Application Support" / "Steward" / "steward.db"
 
 
 def _utc_now():
     """生成便于写入 SQLite 的 UTC 时间字符串。"""
 
     return datetime.now(timezone.utc).isoformat()
+
+
+def _derive_volume_label(resolved_path):
+    """从绝对路径推断这个文件躺在哪个盘上。macOS 外置卷统一挂载在
+    /Volumes/<卷名>/... 下面；不是这个前缀的，就是内置主硬盘，没有一个专门的
+    挂载点路径前缀，统一标成"本机"。这是 macOS 专属的路径约定，以后要上
+    Windows/Linux 得换成对应平台的挂载点判断逻辑（比如 Windows 的盘符）。
+    """
+    parts = resolved_path.parts
+    if len(parts) >= 3 and parts[1] == "Volumes":
+        return parts[2]
+    return "本机"
 
 
 class DocumentIndex:
@@ -51,6 +69,7 @@ class DocumentIndex:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 started_at TEXT NOT NULL,
                 ended_at TEXT,
+                target_dir TEXT,
                 model_name TEXT,
                 model_dimension INTEGER,
                 stats_json TEXT
@@ -62,6 +81,7 @@ class DocumentIndex:
                 size_bytes INTEGER,
                 mtime_ns INTEGER,
                 basic_type TEXT,
+                volume_label TEXT,
                 is_present INTEGER NOT NULL DEFAULT 1,
                 last_seen_run_id INTEGER,
                 FOREIGN KEY (last_seen_run_id) REFERENCES index_runs(id)
@@ -146,8 +166,13 @@ class DocumentIndex:
 
         self.connection.commit()
 
-    def start_run(self, model_info=None):
-        """记录一次索引任务的开始，返回 run id。"""
+    def start_run(self, model_info=None, target_dir=None):
+        """记录一次索引任务的开始，返回 run id。
+
+        target_dir：这次运行扫描的根目录，记下来是为了让"幽灵条目清理"能限定
+        范围——统一数据库下可能同时存有其它目录/盘的记录，这次运行只应该影响
+        它自己扫描的这棵子树，不能全库扫。见 mark_missing_as_absent()。
+        """
 
         model_name = model_info.model_name if model_info else None
         dimension = model_info.dimension if model_info else None
@@ -155,10 +180,10 @@ class DocumentIndex:
         cursor = self.connection.execute(
             """
             INSERT INTO index_runs
-                (started_at, model_name, model_dimension)
-            VALUES (?, ?, ?)
+                (started_at, target_dir, model_name, model_dimension)
+            VALUES (?, ?, ?, ?)
             """,
-            (_utc_now(), model_name, dimension),
+            (_utc_now(), target_dir, model_name, dimension),
         )
         self.connection.commit()
         return cursor.lastrowid
@@ -181,20 +206,22 @@ class DocumentIndex:
 
         file_path = Path(path).expanduser().resolve()
         stat = file_path.stat()
+        volume_label = _derive_volume_label(file_path)
 
         self.connection.execute(
             """
             INSERT INTO documents
-                (path, size_bytes, mtime_ns, basic_type, is_present, last_seen_run_id)
-            VALUES (?, ?, ?, ?, 1, ?)
+                (path, size_bytes, mtime_ns, basic_type, volume_label, is_present, last_seen_run_id)
+            VALUES (?, ?, ?, ?, ?, 1, ?)
             ON CONFLICT(path) DO UPDATE SET
                 size_bytes = excluded.size_bytes,
                 mtime_ns = excluded.mtime_ns,
                 basic_type = excluded.basic_type,
+                volume_label = excluded.volume_label,
                 is_present = 1,
                 last_seen_run_id = excluded.last_seen_run_id
             """,
-            (str(file_path), stat.st_size, stat.st_mtime_ns, basic_type, run_id),
+            (str(file_path), stat.st_size, stat.st_mtime_ns, basic_type, volume_label, run_id),
         )
 
         row = self.connection.execute(
@@ -203,6 +230,66 @@ class DocumentIndex:
         ).fetchone()
         self.connection.commit()
         return row["id"]
+
+    def get_up_to_date_documents(self, model_id):
+        """返回 {path: (size_bytes, mtime_ns)}，只包含"在当前 embedding 模型下
+        已经有完整向量"的文档——供增量索引判断"这个文件要不要跳过重新处理"。
+
+        model_id 为 None（这个模型配置从来没在这个库里用过）时返回空字典，
+        代表没有任何文件能被跳过，全部老老实实走一遍完整流程——这是安全的
+        默认行为，不会因为"以为没变"而漏处理。
+
+        注意：只覆盖 extractions.status='success' 的文件（真正切过片、生成过
+        向量的）。status 是 no_text/error 的文件不会出现在这里，意味着它们
+        每次都会被重新提取一遍——这些文件重新提取的成本远低于"切片+向量化"，
+        不值得为它们单独再加一层判断逻辑。
+        """
+        if model_id is None:
+            return {}
+        cursor = self.connection.execute(
+            """
+            SELECT DISTINCT d.path AS path, d.size_bytes AS size_bytes, d.mtime_ns AS mtime_ns
+            FROM documents d
+            JOIN extractions x ON x.document_id = d.id
+            JOIN chunks c ON c.extraction_id = x.id
+            JOIN embeddings e ON e.chunk_id = c.id
+            WHERE e.model_id = ? AND x.status = 'success'
+            """,
+            (model_id,),
+        )
+        return {row["path"]: (row["size_bytes"], row["mtime_ns"]) for row in cursor.fetchall()}
+
+    def mark_missing_as_absent(self, target_dir, run_id):
+        """把 target_dir 这棵子树下、这次运行没扫到的旧记录标记为不存在
+        （is_present=0），返回被标记的行数。
+
+        path = target_dir 本身：目录自己就是一条记录的情况（比如代码项目）。
+        path LIKE target_dir/%：目录底下的所有文件。用路径前缀限定范围，
+        不能全库扫——统一数据库下可能同时存着其它目录/盘的记录，这次运行
+        不能波及它们。
+
+        last_seen_run_id != run_id：upsert_document() 对每个真被扫到的文件
+        都会把 last_seen_run_id 刷新成这次的 run_id，所以只要不等于这次的
+        run_id，就代表这次扫描没碰到它，判定为消失。
+
+        ESCAPE '\\' + escaped：真实文件夹名字常带 % 或 _（比如"周凯文_住房
+        补贴相关"），这两个字符在 SQL LIKE 里是通配符，不转义会被误当成
+        通配符匹配到不该匹配的路径。
+        """
+        prefix = target_dir.rstrip("/")
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        with self.connection:
+            cursor = self.connection.execute(
+                """
+                UPDATE documents
+                SET is_present = 0
+                WHERE is_present = 1
+                  AND (path = ? OR path LIKE ? ESCAPE '\\')
+                  AND (last_seen_run_id IS NULL OR last_seen_run_id != ?)
+                """,
+                (prefix, escaped + "/%", run_id),
+            )
+            return cursor.rowcount
 
     def save_project_extraction(self, document_id, full_text):
         """保存一个"项目"单位（代码仓库根目录）的自描述内容（README/package.json 摘要拼接）。
@@ -381,9 +468,16 @@ class DocumentIndex:
         now_str = _utc_now()
 
         # 防坑点 1：使用 with self.connection 开启 SQLite 原子事务！
-        # 在 __enter__ 时自动开启事务，如果在后续多步写入/清理中发生异常崩溃，
-        # __exit__ 会自动触发 rollback() 回滚所有删除与修改，防止产生数据半删半留的悬空状态；
-        # 若正常执行结束，会自动触发 commit() 提交修改。
+        # 保证的是"这一个文档的打标签结果 + 标签关联"这一组写入要么全部成功、
+        # 要么全部不生效，不会出现"存了 tagging_results 但标签关联没写全"这种
+        # 半吊子状态。注意这个保证只到"单个文档"这个粒度——之前这里的注释错误
+        # 地暗示了"整个批量打标签过程"的原子性，实测验证过那个说法不成立：
+        # sqlite3 的 `with conn:` 不支持真正的嵌套事务，如果调用方（比如批量
+        # 循环）在外面又包了一层 `with index.connection:`，内层这个 with 退出时
+        # 会提前把已经处理过的部分真正提交到磁盘，不会等到外层一起处理完才
+        # commit/rollback。所以调用这个方法的地方不应该再在外面包一层
+        # `with index.connection:` 期待"批量全部提交或全部回滚"，见
+        # tagging.py 里 Step 5 持久化那段的注释。
         with self.connection:
             # 防坑点 2：使用 ON CONFLICT DO UPDATE (Upsert) 而非 INSERT OR REPLACE。
             # INSERT OR REPLACE 的底层物理动作是先物理删除旧行再插入新行（会导致自增 ID 发生变动/抖动，破坏外键引用）。

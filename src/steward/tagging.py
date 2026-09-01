@@ -259,9 +259,17 @@ def run_tagging_pipeline(
 
     client = _build_llm_client(llm_base_url)
 
-    print("[Step 0] 清空旧有打标签数据...", flush=True)
-    index.clear_tagging_results()
-
+    # 以前这里 Step 0 会无条件先清空全部旧打标签数据（DELETE 整张表），再重新
+    # 逐个处理——实测验证过这个顺序会在崩溃时把数据库拖进比运行前更差的状态：
+    # 旧数据已经被删了，如果中途崩溃（比如 llama-server 挂了），还没处理到的
+    # 文件会变成"完全没有标签"，不是"保留旧标签、等下次再刷新"。改成不再无
+    # 条件清空——save_tagging_result() 本身对每个文档做的是 upsert（按
+    # document_id 原地覆盖 + 标签列表先删后加），单个文档重新处理时天然会拿新
+    # 结果覆盖旧结果，不需要一开始就把全库清空来保证"不会有旧数据残留"。
+    # 代价：如果某份文档以前打过标签、这次运行没有再碰到它（目前 tag 命令还是
+    # 全量处理所有 is_present=1 的文档，这个代价现在不会真的发生），它的旧标签
+    # 会原样保留而不是被清空，这是可以接受的——"保留旧结果"永远好于"用户以为
+    # 打过标签、实际上被清空后没能重新写入"。
     print("[Step 1] 加载已提取文本的文档...", flush=True)
     rows = index.connection.execute(
         """
@@ -397,17 +405,22 @@ def run_tagging_pipeline(
     if basic_rows:
         print(f"[Step 4] {len(basic_rows)} 份非文档类型/提取失败的文件，完成基础标签。", flush=True)
 
-    # Stage 持久化
+    # Stage 持久化——注意这里不再在外面包一层 with index.connection:。之前那样
+    # 写会让人以为"整批要么全部提交、要么全部回滚"，实测验证过这个保证不成立：
+    # save_tagging_result() 内部自己也开了一层事务，sqlite3 的 with 不支持真正
+    # 的嵌套，内层退出就已经真正提交到磁盘了，外层这一层只是摆设。保留内层
+    # 各自独立提交是对的——每个文档的写入本来就该是独立的原子单元，不需要也
+    # 不应该假装它们是一整个不可分割的批次，见 document_index.py 里
+    # save_tagging_result() 的注释。
     print("[Step 5] 持久化写入 SQLite...", flush=True)
-    with index.connection:
-        for doc_id, result in final_results.items():
-            index.save_tagging_result(
-                document_id=doc_id,
-                tags=result.tags,
-                confidence=result.confidence,
-                status=result.status,
-                reasoning=result.reasoning,
-            )
+    for doc_id, result in final_results.items():
+        index.save_tagging_result(
+            document_id=doc_id,
+            tags=result.tags,
+            confidence=result.confidence,
+            status=result.status,
+            reasoning=result.reasoning,
+        )
 
     tagged_count = sum(1 for r in final_results.values() if r.status == "tagged")
     basic_count = sum(1 for r in final_results.values() if r.status == "basic")
