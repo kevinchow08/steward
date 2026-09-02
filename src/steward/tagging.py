@@ -248,8 +248,18 @@ def run_tagging_pipeline(
     llm_model: str = DEFAULT_LLM_MODEL,
     max_workers: int = DEFAULT_MAX_WORKERS,
     min_content_length: int = MIN_CONTENT_LENGTH,
+    force: bool = False,
 ) -> dict:
-    """端到端打标签管线，见模块顶部的分阶段说明。"""
+    """端到端打标签管线，见模块顶部的分阶段说明。
+
+    force=False（默认）时走增量：一份文档如果已经有打标签结果、且它的内容
+    自那以后没有被重新提取过（extractions.created_at 没有比 tagging_results.
+    created_at 更新），就跳过，不重新调用 SLM——复用现成的两个时间戳，不需要
+    新增字段。这只覆盖"内容变了要不要重新打"这一种情况，覆盖不了"打标签的
+    逻辑本身变了"（改了 prompt、换了 snippet 长度、换了模型）——这种情况
+    即使内容一个字都没变，也需要重新打，增量判断天生看不出"代码变了"，
+    只能靠人自己决定要不要传 force=True 强制全部重来。
+    """
 
     from steward.document_vectors import get_all_document_vectors
     from steward.embeddings import LocalEmbedder
@@ -271,23 +281,62 @@ def run_tagging_pipeline(
     # 会原样保留而不是被清空，这是可以接受的——"保留旧结果"永远好于"用户以为
     # 打过标签、实际上被清空后没能重新写入"。
     print("[Step 1] 加载已提取文本的文档...", flush=True)
-    rows = index.connection.execute(
+    all_candidates_count = index.connection.execute(
         """
-        SELECT d.id AS document_id, d.path AS path, x.full_text AS full_text
-        FROM documents d JOIN extractions x ON x.document_id = d.id
+        SELECT COUNT(*) FROM documents d JOIN extractions x ON x.document_id = d.id
         WHERE d.is_present = 1 AND x.status = 'success' AND d.basic_type != 'project'
         """
-    ).fetchall()
-    print(f"[Step 1] 共 {len(rows)} 份文档。", flush=True)
+    ).fetchone()[0]
+    if force:
+        rows = index.connection.execute(
+            """
+            SELECT d.id AS document_id, d.path AS path, x.full_text AS full_text
+            FROM documents d JOIN extractions x ON x.document_id = d.id
+            WHERE d.is_present = 1 AND x.status = 'success' AND d.basic_type != 'project'
+            """
+        ).fetchall()
+    else:
+        # LEFT JOIN tagging_results：没有打过标签的文档（tr.document_id IS NULL）
+        # 一定要处理；打过标签的，只有内容比标签新（x.created_at > tr.created_at，
+        # 也就是这份文档自打上标签之后又被重新提取过）才需要处理，否则跳过。
+        rows = index.connection.execute(
+            """
+            SELECT d.id AS document_id, d.path AS path, x.full_text AS full_text
+            FROM documents d
+            JOIN extractions x ON x.document_id = d.id
+            LEFT JOIN tagging_results tr ON tr.document_id = d.id
+            WHERE d.is_present = 1 AND x.status = 'success' AND d.basic_type != 'project'
+              AND (tr.document_id IS NULL OR x.created_at > tr.created_at)
+            """
+        ).fetchall()
+    skipped_up_to_date = all_candidates_count - len(rows)
+    print(
+        f"[Step 1] 共 {all_candidates_count} 份文档，{skipped_up_to_date} 份已是最新跳过"
+        f"（{'force 模式开启，不跳过' if force else '未开 force'}），{len(rows)} 份进入处理。",
+        flush=True,
+    )
 
     # Stage-project：代码项目单独打标签，数量天然很少（几个到几十个），逐个真实调用一次就够了。
-    project_rows = index.connection.execute(
-        """
-        SELECT d.id AS document_id, d.path AS path, x.full_text AS full_text
-        FROM documents d JOIN extractions x ON x.document_id = d.id
-        WHERE d.is_present = 1 AND x.status = 'success' AND d.basic_type = 'project'
-        """
-    ).fetchall()
+    # 增量判断跟上面文档那部分是同一套逻辑，一并处理。
+    if force:
+        project_rows = index.connection.execute(
+            """
+            SELECT d.id AS document_id, d.path AS path, x.full_text AS full_text
+            FROM documents d JOIN extractions x ON x.document_id = d.id
+            WHERE d.is_present = 1 AND x.status = 'success' AND d.basic_type = 'project'
+            """
+        ).fetchall()
+    else:
+        project_rows = index.connection.execute(
+            """
+            SELECT d.id AS document_id, d.path AS path, x.full_text AS full_text
+            FROM documents d
+            JOIN extractions x ON x.document_id = d.id
+            LEFT JOIN tagging_results tr ON tr.document_id = d.id
+            WHERE d.is_present = 1 AND x.status = 'success' AND d.basic_type = 'project'
+              AND (tr.document_id IS NULL OR x.created_at > tr.created_at)
+            """
+        ).fetchall()
     project_tagged_count = 0
     project_failed_count = 0
     if project_rows:
@@ -436,6 +485,7 @@ def run_tagging_pipeline(
 
     return {
         "total_documents": len(rows),
+        "skipped_up_to_date_count": skipped_up_to_date,
         "tagged_count": tagged_count,
         "basic_count": basic_count,
         "untagged_count": untagged_count,

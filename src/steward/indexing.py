@@ -15,13 +15,20 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 RULES_PATH = BASE_DIR / "config" / "rules.yaml"
 
 
-def build_index(target_dir, embedder, db_path=DEFAULT_DB_PATH):
+def build_index(target_dir, embedder, db_path=DEFAULT_DB_PATH, force=False):
     """为一个目录建立本地 document 内容索引，支持增量（内容没变的文件跳过重新
     处理）和多目录/多盘共享同一个数据库（见 document_index.py 的 DEFAULT_DB_PATH
     注释）。
 
     embedder 由调用方传入，避免这个函数偷偷加载模型；这样模型加载、
     索引范围和数据库路径都由 CLI 或上层业务明确控制。
+
+    force：默认 False，走增量。传 True 会让下面的"已经是最新"判断直接失效
+    （不去查数据库，当成从来没处理过），所有文件不管内容变没变都重新提取/
+    分段/向量化一遍。跟 tag 命令的 --force 是同一个用途——每当"处理逻辑本身"
+    变了（比如这次新加的 chunks_fts 关键词索引，是靠 save_document_content()
+    才会写入的，老数据在增量判断下会一直跳过、永远补不上这个新索引），就需要
+    这个开关强制全部重新走一遍，不能指望增量判断自己发现"逻辑变了"。
     """
 
     # 必须 .resolve()，不能只 .expanduser()——upsert_document() 存文件路径时用的
@@ -66,7 +73,7 @@ def build_index(target_dir, embedder, db_path=DEFAULT_DB_PATH):
         # （get_model_id 返回 None）会让这里返回空字典，所有文件都老实走一遍
         # 完整流程，不会因为"以为没变"而漏处理。
         model_id = index.get_model_id(embedder.info)
-        up_to_date = index.get_up_to_date_documents(model_id)
+        up_to_date = {} if force else index.get_up_to_date_documents(model_id)
 
         # 代码项目根目录（.git/package.json/pyproject.toml 等标记文件命中的目录）
         # 整体登记成一个"项目"单位，不再逐个源码文件走文档分类那条路——项目内部

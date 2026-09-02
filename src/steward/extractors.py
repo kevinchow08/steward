@@ -424,8 +424,24 @@ def _extract_html(path):
     return soup.get_text("\n")
 
 
+# markdown 图片嵌入语法 ![描述](链接)——飞书/语雀这类笔记工具粘贴截图时常见，
+# 链接通常是几十上百个字符的图床 CDN 地址（一长串没有任何空格的哈希/参数），
+# 对语义检索/打标签没有价值，还会把切分算法逼到没有好断点、只能硬切的境地
+# （真实抓到过 chunk 切在这种链接中间的案例）。整段清掉，不只是清掉链接部分——
+# alt 文字通常也是"image.png"这种没有信息量的占位符，不是真实描述。
+_MARKDOWN_IMAGE_PATTERN = re.compile(r"!\[[^\]]*\]\([^)]*\)")
+
+# 普通 markdown 链接 [文字](链接)，跟图片嵌入不同：方括号里的文字通常是真实
+# 有意义的内容（比如"详见 [React 官方文档](https://...)"里的"React 官方文档"），
+# 值得保留，只清掉链接部分——所以只替换成方括号里的文字，不是整段删掉。
+_MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+
+
 def _normalize_text(text):
     """做最小清洗，保留正文顺序，不做语义改写。"""
+
+    text = _MARKDOWN_IMAGE_PATTERN.sub("", text)
+    text = _MARKDOWN_LINK_PATTERN.sub(r"\1", text)
 
     lines = [line.strip() for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
 

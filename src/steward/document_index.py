@@ -128,6 +128,19 @@ class DocumentIndex:
                 FOREIGN KEY (model_id) REFERENCES embedding_models(id) ON DELETE CASCADE
             );
 
+            /* 混合检索用的关键词索引（FTS5 全文检索虚拟表），跟 chunks 表镜像，
+               rowid 直接复用 chunks.id，查询时靠这个字段跟 chunks/documents 关联，
+               不用额外维护一张映射表。tokenize='trigram'：按三字符一组滑窗匹配，
+               不是真正的分词——中文没有空格分词，默认的 unicode61 分词器会把一整句
+               话当成一个词，等于没法做关键词匹配；trigram 不需要理解语言，中英文
+               都能覆盖，代价是查询词必须至少 3 个字符才能匹配上（真实测过，2 个字
+               的查询词一个字符组都凑不出来，天然搜不到——这是设计上的已知代价，
+               不是 bug，混合检索的另一路向量检索没有这个长度限制，能接住这类短查询）。
+               FTS5 虚拟表不受外键 ON DELETE CASCADE 管辖，chunks 被级联删除时这张表
+               不会跟着自动清空，需要在 save_document_content() 里手动同步维护，见那边
+               的注释。 */
+            CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(text, tokenize='trigram');
+
             /* Week 3 新增：打标签引擎核心表结构。这张表最早叫 document_classifications，
                还配了一张 categories 表、一个 category_id 外键，维护一套分类体系，V3
                试了两周后被拿掉了——真实数据反复证明"每份文件收敛到唯一分类"这个目标
@@ -325,6 +338,26 @@ class DocumentIndex:
         model_id = self._get_or_create_model(model_info)
 
         with self.connection:
+            # chunks_fts 是 FTS5 虚拟表，不受外键 ON DELETE CASCADE 管辖——下面
+            # "DELETE FROM extractions"会级联删掉旧的 chunks/embeddings，但不会
+            # 动 chunks_fts，不手动清理的话，旧 chunk 的关键词索引会变成孤儿数据
+            # 一直堆积。必须在级联删除之前先查出旧 chunk id，删掉之后就再也查不到了。
+            old_chunk_ids = [
+                row["id"] for row in self.connection.execute(
+                    """
+                    SELECT c.id AS id FROM chunks c
+                    JOIN extractions x ON x.id = c.extraction_id
+                    WHERE x.document_id = ?
+                    """,
+                    (document_id,),
+                )
+            ]
+            if old_chunk_ids:
+                self.connection.executemany(
+                    "DELETE FROM chunks_fts WHERE rowid = ?",
+                    [(cid,) for cid in old_chunk_ids],
+                )
+
             self.connection.execute(
                 "DELETE FROM extractions WHERE document_id = ?",
                 (document_id,),
@@ -365,6 +398,14 @@ class DocumentIndex:
                     ),
                 )
                 chunk_id = chunk_cursor.lastrowid
+
+                # rowid 直接复用 chunk_id，查询时靠这个字段跟 chunks 表关联，
+                # 不用另外维护一张"chunk_id -> fts_rowid"的映射表。
+                self.connection.execute(
+                    "INSERT INTO chunks_fts(rowid, text) VALUES (?, ?)",
+                    (chunk_id, chunk.text),
+                )
+
                 vector_array = np.asarray(vector, dtype=np.float32)
 
                 if vector_array.ndim != 1 or vector_array.shape[0] != model_info.dimension:
@@ -426,6 +467,42 @@ class DocumentIndex:
             (model_id,),
         )
         yield from cursor
+
+    def search_keyword_chunks(self, query):
+        """用 FTS5 关键词检索，按 bm25 分数从好到坏排序，返回命中的 chunk 及
+        所属文档信息。bm25 分数越小代表匹配度越高（这是 FTS5 的既定约定，
+        不是"数值越大越好"的常见直觉，真实测过验证过，见 semantic_search.py
+        混合检索那部分的注释）。
+
+        不在这里限制返回条数——同一个文档可能有好几个 chunk 命中，过早在
+        chunk 级别截断，可能会把"命中了很多个 chunk、按文档聚合起来其实排名
+        很靠前"的文档提前挤掉。要不要截断、截多少，交给调用方在按文档聚合、
+        算出最终排序之后再做。
+
+        FTS5 的 MATCH 查询语法里 `"`、`*`、AND/OR/NOT 这些是有特殊含义的保留
+        字符/关键词，用户的自然语言查询里凑巧出现是完全可能的（比如一句话里
+        真的有个双引号），这种情况下 MATCH 会抛语法错误——捕获它、返回空列表，
+        让关键词检索这一路安静地不参与这次排序，不能因为这个让整个混合检索
+        崩掉（向量检索那一路完全不受这个语法限制，可以正常兜底）。
+        """
+        try:
+            cursor = self.connection.execute(
+                """
+                SELECT c.id AS chunk_id, d.id AS document_id, d.path AS path,
+                       c.chunk_index AS chunk_index, c.text AS chunk_text,
+                       bm25(chunks_fts) AS bm25_score
+                FROM chunks_fts
+                JOIN chunks c ON c.id = chunks_fts.rowid
+                JOIN extractions x ON x.id = c.extraction_id
+                JOIN documents d ON d.id = x.document_id
+                WHERE chunks_fts MATCH ? AND d.is_present = 1 AND x.status = 'success'
+                ORDER BY bm25_score ASC
+                """,
+                (query,),
+            )
+            return cursor.fetchall()
+        except sqlite3.OperationalError:
+            return []
 
     def _get_or_create_model(self, model_info):
         """取得模型记录；同一模型配置只保存一条。"""
