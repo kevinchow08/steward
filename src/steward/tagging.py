@@ -53,6 +53,9 @@ import httpx
 import numpy as np
 from openai import OpenAI
 
+from steward.extractors import spread_sample_text, strip_sample_note
+from steward.monitor import ResourceMonitor, find_process_by_name
+
 
 # Stage①：内容去空白后短于这个字符数，直接判 untagged，不调用 SLM
 MIN_CONTENT_LENGTH = 30
@@ -85,25 +88,38 @@ def _build_llm_client(base_url: str = DEFAULT_LLM_BASE_URL) -> OpenAI:
 
 
 def _extract_snippet(text: str, file_path: str = "", max_len: int = 1500) -> str:
-    """提取文档的有效正文片段，根据文件类型做差异化处理。
+    """提取文档的有效正文片段。
 
-    - HTML 文件：先剥离标签，跳过前 200 字符的 <head>/导航区
-    - PDF 文件：跳过前 350 字符（发票/表单类 PDF 前段通常是固定表头字段）
-    - 其他（.md/.txt）：直接从头取，内容通常从第一行就有语义
+    分三步，顺序不能换：
+    1. 先剥掉 indexing.py 落库前可能拼上去的那句"原文过大已抽样"提示语（见
+       extractors.py 的 strip_sample_note()）——这句话是写给人看的元信息，
+       不是文档正文，留着不剥的话，spread_sample_text() 的第一片样本永远从
+       开头取，会把这句提示语当成内容读进去，白白占掉摘要预算。
+    2. 按文件类型跳过已知的开头噪声（HTML 的 <head>/导航区、PDF 常见的表单
+       固定字段），不管内容长不长、接下来走哪种抽取策略，这段噪声都不该被
+       读进去——之前的版本里这一步只在"内容不算太长"时生效，内容长到需要
+       走下面的均匀抽样时反而被跳过，越是长的 PDF/HTML（也越可能真的有一坨
+       开头噪声）越保护不到，是修复过的一个真实问题。
+    3. 跳过噪声之后，剩下的内容还是远超 max_len（超过 10 倍）就改成均匀抽样，
+       不再是固定读开头——见 extractors.py 的 spread_sample_text() 注释，
+       这种规模下"读开头"的代表性太差；否则直接从开头取 max_len 长度即可，
+       内容通常从这里开始就有语义。
     """
     ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
 
+    text = strip_sample_note(text)
     clean = re.sub(r"<[^>]+>", " ", text)
     clean = re.sub(r"\s+", " ", clean).strip()
 
-    if ext in ("html", "htm"):
-        start = 200 if len(clean) > 400 else 0
-    elif ext == "pdf":
-        start = 350 if len(clean) > 600 else 0
-    else:
-        start = 0
+    if ext in ("html", "htm") and len(clean) > 400:
+        clean = clean[200:]
+    elif ext == "pdf" and len(clean) > 600:
+        clean = clean[350:]
 
-    return clean[start:start + max_len].strip()
+    if len(clean) > max_len * 10:
+        return spread_sample_text(clean, max_len)
+
+    return clean[:max_len].strip()
 
 
 # 判断 reasoning 是不是正常收尾的完整句子，不是生成中途断掉的残句。真实撞过的坑：
@@ -269,6 +285,24 @@ def run_tagging_pipeline(
 
     client = _build_llm_client(llm_base_url)
 
+    # 之前只有 indexing.py 的 build_index() 接了 ResourceMonitor，Week 3 这条
+    # 打标签管线（真正跑几百次 LLM 推理调用的地方）从来没接过——CPU/内存这种
+    # 最基础的资源数据一直是空的。GPU 算力占用这块先不测：macOS 上测这个基本
+    # 要靠 powermetrics，这个命令需要 sudo，把一个要 sudo 的子进程调用嵌进日常
+    # 跑的 tag 命令里，意味着以后每次跑都可能被要求输入密码，这个体验代价要不要
+    # 接受是个单独的决定，不接受。
+    #
+    # 内存这块不受这个限制——统一内存架构下不需要专门的 GPU 工具，但要测对
+    # 进程：真正调用模型推理的是 llama-server 那个独立进程，不是 steward 自己
+    # 这个 Python 进程，两边是两笔独立的开销（steward 自己加载 embedding 模型、
+    # 批量算向量矩阵是一笔，llama-server 加载模型权重、维护 KV cache 是另一笔），
+    # 所以这里起两个 ResourceMonitor，不是把其中一个换成另一个。llama_monitor
+    # 找不到 llama-server 进程时（比如服务没启动）保持 None，后面只报 steward
+    # 自己这一路的数据，不会让整个打标签任务因为"找不到监控对象"而失败。
+    monitor = ResourceMonitor()
+    llama_pid = find_process_by_name("llama-server")
+    llama_monitor = ResourceMonitor(pid=llama_pid) if llama_pid is not None else None
+
     # 以前这里 Step 0 会无条件先清空全部旧打标签数据（DELETE 整张表），再重新
     # 逐个处理——实测验证过这个顺序会在崩溃时把数据库拖进比运行前更差的状态：
     # 旧数据已经被删了，如果中途崩溃（比如 llama-server 挂了），还没处理到的
@@ -393,6 +427,9 @@ def run_tagging_pipeline(
             if result:
                 raw_results[doc_id] = result
             done += 1
+            monitor.sample()
+            if llama_monitor is not None:
+                llama_monitor.sample()
             if done % 50 == 0 or done == len(to_tag):
                 print(f"  [Step 2] 已完成 {done}/{len(to_tag)}", flush=True)
 
@@ -483,7 +520,7 @@ def run_tagging_pipeline(
         flush=True,
     )
 
-    return {
+    stats = {
         "total_documents": len(rows),
         "skipped_up_to_date_count": skipped_up_to_date,
         "tagged_count": tagged_count,
@@ -495,3 +532,15 @@ def run_tagging_pipeline(
         "project_tagged_count": project_tagged_count,
         "project_failed_count": project_failed_count,
     }
+    # 两路资源监控各自的结果都带 "elapsed_seconds"/"peak_rss_mb"/"peak_cpu_percent"
+    # 这几个同名字段——不能直接把两份 dict 都 update 进 stats，后 update 的会
+    # 悄悄覆盖掉先 update 的。加前缀区分开，两边的数据都保留、都看得到。
+    for key, value in monitor.stop().items():
+        stats[f"steward_{key}"] = value
+    if llama_monitor is not None:
+        for key, value in llama_monitor.stop().items():
+            stats[f"llama_server_{key}"] = value
+    else:
+        stats["llama_server_peak_rss_mb"] = None
+        stats["llama_server_peak_cpu_percent"] = None
+    return stats

@@ -206,6 +206,19 @@ def _extract_csv(path):
     return "\n".join(rows)
 
 
+# xlsx/xls 提取多工作表时，用来标注"这是哪个工作表"的分隔行格式——下面三处
+# 提取函数（openpyxl 正常路径、xlrd 老 OLE2 路径、SpreadsheetML XML 路径）
+# 都要写这个标记，chunking.py 的 chunk_tabular_text() 要靠认出它来切表格块。
+# 定义只放这一处，chunking.py 从这里 import 过去拼正则，不在两个文件里
+# 各写一份一样的字符串（改一处忘了改另一处，两边就对不上了）。
+SHEET_MARKER_PREFIX = "[sheet: "
+SHEET_MARKER_SUFFIX = "]"
+
+
+def format_sheet_marker(sheet_name):
+    return f"{SHEET_MARKER_PREFIX}{sheet_name}{SHEET_MARKER_SUFFIX}"
+
+
 def _extract_xlsx(path):
     """提取 XLSX 每个工作表的单元格内容，单元格之间用制表符连接（跟 CSV/DOCX
     表格提取用同一套约定）。data_only=True 读公式单元格最后一次计算出来的缓存值，
@@ -226,7 +239,7 @@ def _extract_xlsx(path):
                 if any(cells):
                     sheet_rows.append("\t".join(cells))
             if sheet_rows:
-                blocks.append(f"[工作表: {sheet.title}]\n" + "\n".join(sheet_rows))
+                blocks.append(f"{format_sheet_marker(sheet.title)}\n" + "\n".join(sheet_rows))
         return "\n\n".join(blocks)
     finally:
         workbook.close()
@@ -288,7 +301,7 @@ def _extract_spreadsheetml(path):
             if any(cells):
                 sheet_rows.append("\t".join(cells))
         if sheet_rows:
-            blocks.append(f"[工作表: {sheet_name}]\n" + "\n".join(sheet_rows))
+            blocks.append(f"{format_sheet_marker(sheet_name)}\n" + "\n".join(sheet_rows))
     return "\n\n".join(blocks)
 
 
@@ -325,14 +338,98 @@ def _extract_xls_binary(path):
             if any(cells):
                 sheet_rows.append("\t".join(cells))
         if sheet_rows:
-            blocks.append(f"[工作表: {sheet.name}]\n" + "\n".join(sheet_rows))
+            blocks.append(f"{format_sheet_marker(sheet.name)}\n" + "\n".join(sheet_rows))
     return "\n\n".join(blocks)
+
+
+# 顶层是数组、元素数量超过这个阈值的 JSON，判定为"很多条独立记录堆在一个数组里"
+# （聊天记录导出、日志导出、邮件导出都是这个形状），提取时均匀抽样，不整份塞进
+# full_text——真实撞过的坑：一份 6000 万字符的聊天记录导出文件，顶层数组里塞了
+# 几百上千条互相独立的对话，被当成一整篇连续文章处理会导致两个问题同时发生：
+# (1) 切分之后 chunk 数量爆炸（这一份文件真实切出过 9 万+ chunk），向量化开销
+# 失控；(2) 打标签阶段只读 full_text 最前面一小段做摘要，真实测过这一小段只
+# 覆盖了全文的 0.0025%、且全部来自最早的第一条记录，模型据此打出来的标签完全
+# 不能代表这份文件实际装了什么。这两个问题本质是同一个病灶（记录被硬拼成一篇），
+# 在提取这一步用均匀抽样解决，切分和打标签不需要知道发生过抽样，天然会拿到
+# 跨度更广、更有代表性的内容。阈值不针对某个具体导出工具的 schema，任何"顶层
+# 数组元素很多"的 JSON 都适用。
+# ===== 代表性抽样工具包 =====
+# 提取/切分/落库这几个阶段都会遇到"内容太多，需要瘦身但不能只看开头"这个
+# 同一类问题，抽样算法只在这里写一份，谁需要谁 import，不各自重复实现。
+#
+# 早期版本里，_extract_json() 会对 JSON 顶层数组单独做"按记录抽样"（比如
+# 1151 条聊天记录抽 300 条），设想是"记录级抽样比字符级抽样更公平"。真实
+# 实测（用真实的 118MB conversations.json 对比）推翻了这个设想：按记录先
+# 抽 300 条、再切分、再靠下面 chunk 数量上限抽 500 个 chunk，最终只覆盖了
+# 1151 条原始记录里的 180 条(15.6%)；不做这道 JSON 专属预处理，直接对完整
+# 原文切分、只靠 chunk 数量上限兜底抽样，反而覆盖了 362 条(31.5%)——因为
+# "先按记录抽样"这一步会直接砍掉大多数记录（74%），砍掉的部分之后再也没有
+# 机会被选中；而直接对完整原文做 chunk 级别的均匀抽样，抽样间隔天然比单条
+# 记录的跨度更大，几乎每条原始记录都有平等机会被抽中。所以现在不再对 JSON
+# 数组做任何格式专属的预处理，所有格式统一走"完整原文切分 → chunk 数量
+# 上限兜底 → 落库前文本体积上限兜底"这一条路，没有例外分支。
+
+
+def _sample_evenly(items, k):
+    """从 items 里均匀抽样出最多 k 个，不是简单取前 k 个——保留跨越整个序列的
+    代表性。只取前面的话，抽样结果只能反映序列最早的那一部分，看不出后面还有
+    什么。
+    """
+    if len(items) <= k or k <= 0:
+        return list(items)
+    step = len(items) / k
+    return [items[int(i * step)] for i in range(k)]
+
+
+def spread_sample_text(text, max_len, pieces=5):
+    """从很长的文本里均匀抽几段小样本拼起来，跨度覆盖全文，不是只读开头。
+
+    跟 _sample_evenly() 解决的是同一类问题的另一种形态：_sample_evenly() 是
+    "一份列表里挑几个元素"，这个函数是"一整段字符串里挑几个片段"，用于文本
+    本身没有天然的"记录"分界（比如一整篇连贯文章），没法先转成列表再抽样的
+    场景。跟单纯读开头相比，均匀分布在全文的样本才能真正反映内容的多样性，
+    不会因为只读最前面一小段就得出片面的印象。
+    """
+    piece_len = max(max_len // pieces, 1)
+    denom = max(pieces - 1, 1)
+    samples = []
+    for i in range(pieces):
+        if len(text) <= piece_len:
+            offset = 0
+        else:
+            offset = int(i * (len(text) - piece_len) / denom)
+            offset = max(0, min(offset, len(text) - piece_len))
+        samples.append(text[offset:offset + piece_len])
+    return "\n...\n".join(samples).strip()
+
+
+# 落库前对 extraction.text 做体积压缩时（见 indexing.py），会在压缩后的文本最
+# 前面拼一句人话提示，如实说明"这不是完整原文"。格式定义只放这一处，写(indexing.py
+# 生成这句提示)、读(tagging.py 打标签摘要要把它当噪声剥掉，不然它会被当成正文
+# 内容读进去)两边共用，不各写一份——跟 SHEET_MARKER_PREFIX 是同一个思路。
+_SAMPLE_NOTE_PATTERN = re.compile(r"^（提示：原文共 \d+ 字符，数量过多，[^）]*）\n?")
+
+
+def format_sample_note(original_char_count):
+    return f"（提示：原文共 {original_char_count} 字符，数量过多，这里是均匀抽样保留的代表性内容，不是完整原文）"
+
+
+def strip_sample_note(text):
+    """如果开头是 format_sample_note() 拼上去的那句提示，去掉它——这句提示是
+    写给人看的元信息，不是文档正文，不该被当成内容片段读进摘要/embedding。
+    没有这句提示的文本原样返回。
+    """
+    return _SAMPLE_NOTE_PATTERN.sub("", text, count=1)
 
 
 def _extract_json(path):
     """把 JSON 重新格式化成带缩进的可读文本。选择保留完整结构（key 和 value 都在，
     不是只抽字符串值），因为 key 本身往往带有语义（比如 "name": "React" 里
     "name" 这个 key 是有意义的上下文，丢掉就退化成一堆孤立的字符串）。
+
+    不在这里对内容量做任何抽样/截断——原因见上面"代表性抽样工具包"那段注释，
+    多大的 JSON 都原样格式化返回，交给下游统一的 chunk 数量上限 + 落库体积
+    上限兜底。
     """
 
     import json as json_module

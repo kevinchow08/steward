@@ -1,6 +1,9 @@
 """把提取后的长文本切成适合 embedding 的片段。"""
 
+import re
 from dataclasses import asdict, dataclass
+
+from steward.extractors import SHEET_MARKER_PREFIX, SHEET_MARKER_SUFFIX
 
 
 @dataclass
@@ -125,5 +128,107 @@ def chunk_text(text, max_chars=800, overlap_chars=100):
             if aligned is not None and aligned > next_start:
                 next_start = aligned
         start = max(next_start, start + 1)
+
+    return chunks
+
+
+# _extract_xlsx()/_extract_xls() 在多个工作表之间插入的分隔行，chunk_tabular_text()
+# 靠它识别"一个新的表格块开始了"——不能把上一个工作表的表头带到下一个工作表的
+# chunk 里。csv 没有这个标记，整份内容天然只有一个表格块。
+#
+# 正则从 extractors.py 的 SHEET_MARKER_PREFIX/SUFFIX 拼出来，不在这里重复写死
+# 一份一样的中文字符串——标记格式改了，两边只需要改 extractors.py 那一处。
+# re.escape() 是因为 "[" "]" 在正则里是特殊字符（字符集语法），拼进正则前
+# 必须转义成字面量，否则会被解析成别的意思。
+_SHEET_MARKER_PATTERN = re.compile(
+    rf"^{re.escape(SHEET_MARKER_PREFIX)}.*{re.escape(SHEET_MARKER_SUFFIX)}$"
+)
+
+
+def _split_into_table_blocks(text):
+    """把表格类提取文本按工作表边界拆成一个个"表格块"，每块是
+    (表头行, 这块除表头外的数据行列表)。表头是这块里第一行有内容的行——
+    对 csv 就是原本的列名行，对 xlsx 的某个工作表就是这个工作表自己的第一行。
+    整块都是空行的情况直接跳过，不产出空表头的块。
+
+    分两个阶段，不夹在一起做：
+    第一阶段只管"分桶"——按标记行把所有行分进一个个桶（raw_blocks，
+    每个桶是一份工作表的原始行），标记行本身不进任何桶，只负责触发"开一个
+    新桶"。第二阶段才对每个桶做"拆表头/丢空桶"这件事，桶不管来自中间遇到
+    标记行分出来的、还是最后一个没被后续标记行终结的，处理方式完全一样，
+    不需要在扫描过程中特殊照顾"最后一块没人来收尾"这件事。
+    """
+    raw_blocks = [[]]
+    for line in text.split("\n"):
+        if _SHEET_MARKER_PATTERN.match(line.strip()):
+            raw_blocks.append([])  # 开一个新桶，标记行自己不进桶
+            continue
+        raw_blocks[-1].append(line)
+
+    blocks = []
+    for lines in raw_blocks:
+        first_content_idx = next((i for i, l in enumerate(lines) if l.strip()), None)
+        if first_content_idx is None:
+            continue  # 这个桶全是空行，没有表头也没有数据，跳过
+        header = lines[first_content_idx]
+        data_lines = lines[first_content_idx + 1:]
+        blocks.append((header, data_lines))
+
+    return blocks
+
+
+def chunk_tabular_text(text, max_chars=800):
+    """专门给表格类内容（csv/xlsx/xls 提取出来的、一行一条数据的文本）设计的
+    切分函数，解决 chunk_text() 对表格数据的一个真实缺陷：普通切分只看字符
+    数，切到文档中间的 chunk 天然看不到最前面的表头行，模型/搜索拿到这些
+    chunk 时，是一堆脱离列名上下文的数字/文字，不知道对应哪一列。这里
+    **每个 chunk 都带上它所属表格块的表头行**，不只是第一个 chunk。
+
+    不像 chunk_text() 那样精确维护 start_offset/end_offset 对应原文里的
+    精确字符位置——这两个字段现在全项目没有任何代码真正读取（只是存进
+    数据库，没人用），这里退化成"这个 chunk 大致是从原文哪里开始的"，
+    不值得为一个没人用的字段增加复杂度。
+
+    不做重叠（不像 chunk_text 有 overlap_chars）——表格数据每一行本来就是
+    独立的一条记录，行与行之间没有"一个句子被切断"这种需要靠重叠去弥补的
+    语义连续性问题，表头本身已经把每个 chunk 需要的上下文补全了。
+    """
+    if not text or not text.strip():
+        return []
+
+    blocks = _split_into_table_blocks(text)
+    chunks = []
+    chunk_index = 0
+    cursor = 0
+
+    for header, data_lines in blocks:
+        current_rows = []
+        current_len = len(header)
+
+        def _flush():
+            nonlocal chunk_index, cursor
+            if not current_rows:
+                return
+            body = "\n".join(current_rows)
+            chunk_value = f"{header}\n{body}" if header else body
+            chunks.append(TextChunk(
+                index=chunk_index,
+                text=chunk_value,
+                start_offset=cursor,
+                end_offset=cursor + len(body),
+            ))
+            chunk_index += 1
+            cursor += len(body) + 1
+
+        for row in data_lines:
+            if not row.strip():
+                continue
+            if current_rows and current_len + len(row) + 1 > max_chars:
+                _flush()
+                current_rows = []
+                current_len = len(header)
+            current_rows.append(row)
+            current_len += len(row) + 1
+        _flush()
 
     return chunks

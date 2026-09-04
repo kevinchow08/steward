@@ -192,6 +192,12 @@ def run_tag(db_path, max_workers=8, force=False):
     print(f"代码项目: {stats['project_count']} 个（{stats['project_tagged_count']} 个已打标签，"
           f"{stats['project_failed_count']} 个失败）")
     print(f"全管线总耗时: {elapsed:.3f} 秒")
+    print(f"steward 自身进程 峰值内存: {stats['steward_peak_rss_mb']:.1f} MB | 峰值 CPU: {stats['steward_peak_cpu_percent']:.1f}%")
+    if stats["llama_server_peak_rss_mb"] is not None:
+        print(f"llama-server 进程 峰值内存: {stats['llama_server_peak_rss_mb']:.1f} MB | "
+              f"峰值 CPU: {stats['llama_server_peak_cpu_percent']:.1f}%")
+    else:
+        print("llama-server 进程: 没找到，跳过这一路监控（GPU 算力占用暂不测，见 monitor.py 的注释）")
     print(f"数据库持久化: {db_path}")
 
 
