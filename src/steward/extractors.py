@@ -13,7 +13,7 @@ from typing import Optional
 
 
 # 单个文件提取的超时时间。个别下载损坏的文件（比如把 HTTP 错误响应存成了 .pdf）
-# 会让 pypdf 的容错解析陷入极慢的恢复尝试，不设超时的话可能拖住整批索引。
+# 会让 PDF 库的容错解析陷入极慢的恢复尝试，不设超时的话可能拖住整批索引。
 EXTRACTION_TIMEOUT_SECONDS = 30
 
 
@@ -86,7 +86,7 @@ def _dispatch_extract(suffix, path):
     """按后缀分发到对应的提取函数，返回 (text, extractor_name)。"""
 
     if suffix == ".pdf":
-        return _extract_pdf(path), "pypdf"
+        return _extract_pdf(path), "pymupdf"
     elif suffix == ".docx":
         return _extract_docx(path), "python-docx"
     elif suffix == ".doc":
@@ -440,14 +440,28 @@ def _extract_json(path):
 
 
 def _extract_pdf(path):
-    """提取 PDF 的文字层；扫描版 PDF 没有文字层时返回空字符串。"""
+    """提取 PDF 的文字层；扫描版 PDF 没有文字层时返回空字符串。
 
-    from pypdf import PdfReader
+    原本用 pypdf，换成了 pymupdf（import 名字还是 fitz，是历史遗留的旧包名，
+    库本身已经改名叫 pymupdf 了）——真实撞到过 pypdf 在某一类 PDF 上的解析
+    局限：这批 PDF 内嵌的中文字体用 Identity-H 编码（PDF 文本流里存的是字体
+    自己的字形编号，不是标准 Unicode），要靠一份 ToUnicode 映射表才能还原成
+    真正的汉字；这批文件的映射表要么缺失要么不完整，pypdf 遇到这种情况解析
+    失败后会瞎猜，猜出来的是一堆跟原文毫不相关的字符（泰米尔文、古吉拉特文
+    这类文档里根本不该出现的文字）；pymupdf 底层的字体处理更健壮，能从字体
+    文件自己内部的映射表兜底读出正确编码，同样几份文件实测能正常还原成汉字。
+    这跟"扫描版 PDF 没有文字层，只能靠 OCR"是两类不同的问题——那类是真的没救
+    （两个库测出来都是空的），这类是可以靠换库解决的，实测过没有引入新的
+    退步（真实语料交叉对比，pymupdf 没有比 pypdf 更差的案例）。
+    """
 
-    reader = PdfReader(str(path))
-    pages = []
-    for page in reader.pages:
-        pages.append(page.extract_text() or "")
+    import fitz  # pymupdf 的 import 名字，历史遗留
+
+    doc = fitz.open(str(path))
+    try:
+        pages = [page.get_text() for page in doc]
+    finally:
+        doc.close()
     return "\n\n".join(pages)
 
 

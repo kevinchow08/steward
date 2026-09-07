@@ -174,6 +174,16 @@ class DocumentIndex:
                 FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE,
                 FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
             );
+
+            /* 搜索用的标签关键词索引——原理跟上面 chunks_fts 完全一样（trigram 分词、
+               FTS5 虚拟表），唯一的区别是粒度：chunks_fts 一行对应一个 chunk，这张表
+               一行对应一整份文档（rowid 复用 documents.id），存的是这份文档全部标签
+               名拼在一起的文字。存在的意义：向量/关键词检索都是按 chunk 粒度算分的，
+               一份文档整体的主题如果没有集中体现在某一个 800 字符的 chunk 里，会在
+               那两路检索里"隐形"——但这个主题恰恰是打标签时模型看完整篇之后才提炼
+               出来的，标签检索能补上这个盲区。同样不受外键 ON DELETE CASCADE 管辖，
+               需要在 save_tagging_result() 里手动同步维护。 */
+            CREATE VIRTUAL TABLE IF NOT EXISTS document_tags_fts USING fts5(tags_text, tokenize='trigram');
             """
         )
 
@@ -504,6 +514,31 @@ class DocumentIndex:
         except sqlite3.OperationalError:
             return []
 
+    def search_document_tags(self, query):
+        """用 FTS5 在标签这一层做关键词检索，按 bm25 从好到坏排序，返回命中的
+        文档。跟 search_keyword_chunks() 是同一套逻辑，唯一区别是粒度——这里
+        rowid 直接就是 document_id，一份文档只有一行，天然不需要再按文档聚合
+        去重（search_keyword_chunks() 因为一份文档可能有好几个 chunk 命中，
+        需要调用方事后聚合；这里不存在这个问题）。同样要兜住 FTS5 MATCH 语法
+        保留字符导致的解析错误，让这一路安静地不参与排序，不拖垮整个搜索。
+        """
+        try:
+            cursor = self.connection.execute(
+                """
+                SELECT d.id AS document_id, d.path AS path,
+                       document_tags_fts.tags_text AS tags_text,
+                       bm25(document_tags_fts) AS bm25_score
+                FROM document_tags_fts
+                JOIN documents d ON d.id = document_tags_fts.rowid
+                WHERE document_tags_fts MATCH ? AND d.is_present = 1
+                ORDER BY bm25_score ASC
+                """,
+                (query,),
+            )
+            return cursor.fetchall()
+        except sqlite3.OperationalError:
+            return []
+
     def _get_or_create_model(self, model_info):
         """取得模型记录；同一模型配置只保存一条。"""
 
@@ -526,9 +561,17 @@ class DocumentIndex:
         return row["id"]
 
     def clear_tagging_results(self):
-        """清空旧有的打标签历史数据，保证重新打标签时无残存数据。"""
+        """清空旧有的打标签历史数据，保证重新打标签时无残存数据。
+
+        当前打标签管线（tagging.py）已经不再调用这个方法了（Step 0 无条件
+        清空的做法在崩溃安全性排查里被认定有风险，改成了逐文档 upsert，见
+        save_tagging_result() 的注释），这里留着只是为了不留半吊子的失效
+        方法——真要调用它，document_tags_fts 也要一起清，不然会留下指向已经
+        不存在的 document_tags 关联的孤儿索引行。
+        """
         with self.connection:
             self.connection.execute("DELETE FROM document_tags;")
+            self.connection.execute("DELETE FROM document_tags_fts;")
             self.connection.execute("DELETE FROM tagging_results;")
             self.connection.execute("DELETE FROM tags;")
 
@@ -581,7 +624,10 @@ class DocumentIndex:
                 (document_id,),
             )
 
-            # 批量绑定新的标签关联
+            # 批量绑定新的标签关联，顺便攒一份干净的标签名列表给下面的
+            # document_tags_fts 用——不能直接复用 tags 参数，它里面可能混着
+            # (name, confidence) 元组、空字符串这些需要过滤/取出名字的情况。
+            clean_tag_names = []
             for item in tags:
                 if isinstance(item, tuple):
                     tag_name, tag_conf = item[0], float(item[1])
@@ -591,6 +637,7 @@ class DocumentIndex:
                 tag_name = tag_name.strip()
                 if not tag_name:
                     continue
+                clean_tag_names.append(tag_name)
                 tag_id = self._get_or_create_tag(tag_name)
                 self.connection.execute(
                     """
@@ -602,11 +649,40 @@ class DocumentIndex:
                     (document_id, tag_id, tag_conf),
                 )
 
-    def iter_tagging_results(self):
-        """读取所有文档的打标签状态、置信度、reasoning 及标签列表。"""
+            # document_tags_fts 的 rowid 复用 document_id，跟 chunks_fts 复用
+            # chunk_id 是同一个思路。FTS5 虚拟表没有 ON CONFLICT 语法，重新
+            # 打标签要先删掉这份文档的旧索引行再插入新的，不能直接覆盖写。
+            self.connection.execute(
+                "DELETE FROM document_tags_fts WHERE rowid = ?",
+                (document_id,),
+            )
+            if clean_tag_names:
+                self.connection.execute(
+                    "INSERT INTO document_tags_fts(rowid, tags_text) VALUES (?, ?)",
+                    (document_id, " ".join(clean_tag_names)),
+                )
+
+    def iter_tagging_results(self, document_ids=None):
+        """读取文档的打标签状态、置信度、reasoning 及标签列表。
+
+        document_ids：可选，传入的话只返回这几个 document_id（给 main.py 的
+        `tags --tag` 筛选功能用——先用 search_document_tags() 按标签关键词
+        找出命中的文档 id，再传进来只取这几份的完整详情，不重新发明一套
+        查询逻辑，只是加一层可选的范围限制）。传 None（默认）返回全部，
+        传空列表直接不产出任何结果（不值得为了返回"什么都没有"跑一次
+        全表查询）。
+        """
+        where_clause = "WHERE d.is_present = 1"
+        params = ()
+        if document_ids is not None:
+            if not document_ids:
+                return
+            placeholders = ",".join("?" for _ in document_ids)
+            where_clause += f" AND d.id IN ({placeholders})"
+            params = tuple(document_ids)
 
         cursor = self.connection.execute(
-            """
+            f"""
             SELECT
                 d.id AS document_id,
                 d.path AS path,
@@ -617,9 +693,10 @@ class DocumentIndex:
                 dc.created_at AS created_at
             FROM documents d
             JOIN tagging_results dc ON dc.document_id = d.id
-            WHERE d.is_present = 1
+            {where_clause}
             ORDER BY dc.created_at DESC
-            """
+            """,
+            params,
         )
 
         for row in cursor.fetchall():

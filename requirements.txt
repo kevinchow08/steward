@@ -1,6 +1,6 @@
 pyyaml
 psutil
-pypdf
+pymupdf
 python-docx
 beautifulsoup4
 numpy

@@ -126,26 +126,37 @@ def run_search(query, db_path, top_k):
     total_seconds = time.monotonic() - total_start
 
     if not results:
-        print("没有找到结果。")
+        # 三路（向量/关键词/标签）全部没有真正相关的命中，如实说没找到，
+        # 不再像以前那样因为向量检索没有相关度门槛而强行凑出 top_k 个
+        # 看起来正常、实际不相关的结果。
+        print("没有找到足够相关的内容。")
     else:
         for index, result in enumerate(results, start=1):
-            # 这个 score 是向量检索+关键词检索融合排序（RRF）之后的分数，不是
-            # 相似度百分比，数值本身很小、没有直接意义，只用来决定排在第几，
-            # 不要按"匹配度多少%"去解读。
+            # 这个 score 是三路检索（向量+关键词+标签）融合排序（RRF）之后的
+            # 分数，不是相似度百分比，数值本身很小、没有直接意义，只用来决定
+            # 排在第几，不要按"匹配度多少%"去解读。
             print(f"{index}. 融合排序分数={result.score:.4f}")
             print(f"   文件: {result.path}")
             print(f"   chunk: {result.chunk_index}")
             print(f"   片段: {result.text}")
+        # document_count 是过滤/融合之后的完整命中数（不受 top_k 截断），
+        # 比展示出来的这几条多，说明还有更多真正相关的结果没显示，如实说明，
+        # 不要让 --top_k 悄悄截断掉用户看不到的其余结果。
+        if stats["document_count"] > len(results):
+            print(f"（共 {stats['document_count']} 个结果通过相关度门槛，这里只展示前 {len(results)} 个，"
+                  "加大 --top-k 看更多）")
 
     # 3. 打印性能与耗时监控信息
     print("-" * 50)
     print("【性能与耗时统计】")
     print(f"最终命中文档: {stats['document_count']} 个 | 比较片段(chunks): {stats['chunk_count']} 个")
-    print(f"向量检索命中: {stats['dense_hit_count']} 个文档 | 关键词检索命中: {stats['sparse_hit_count']} 个文档")
+    print(f"向量检索命中: {stats['dense_hit_count']} 个文档 | 关键词检索命中: {stats['sparse_hit_count']} 个文档 "
+          f"| 标签检索命中: {stats['tag_hit_count']} 个文档")
     print(f"模型加载耗时: {model_load_seconds:.3f} 秒")
     print(f"Query 向量化: {stats['query_embed_seconds']:.3f} 秒")
     print(f"向量检索耗时: {stats['vector_search_seconds']:.3f} 秒")
     print(f"关键词检索耗时: {stats['keyword_search_seconds']:.3f} 秒")
+    print(f"标签检索耗时: {stats['tag_search_seconds']:.3f} 秒")
     print(f"搜索总耗时:   {total_seconds:.3f} 秒")
 
 
@@ -202,20 +213,42 @@ def run_tag(db_path, max_workers=8, force=False):
 
 
 
-def run_tags(db_path):
-    """展示 SQLite 中已打标签文档的标签、reasoning 及置信度，并输出到文件。"""
+def run_tags(db_path, tag_query=None):
+    """展示 SQLite 中已打标签文档的标签、reasoning 及置信度，并输出到文件。
+
+    tag_query：可选。传了的话不生成全量报告，改成"给我列出所有标签匹配这个
+    关键词的文档"——这是跟 search 命令不一样的能力：search 是排序找最相关
+    的前几个（会被 top_k 截断、会被相关度门槛过滤，不保证完整），这里是
+    穷举式的集合筛选，只要标签匹配就一定会出现在报告里，不会因为其他信号
+    弱就被漏掉。底层直接用 search_document_tags()（标签关键词检索，不需要
+    加载 embedding 模型，比 search 命令快得多），不经过 RRF 融合排序。
+    """
 
     from steward.document_index import DocumentIndex
 
+    bm25_by_id = None
     with DocumentIndex(db_path) as index:
-        records = list(index.iter_tagging_results())
+        if tag_query:
+            hits = index.search_document_tags(tag_query)
+            if not hits:
+                print(f"没有找到标签匹配 {tag_query!r} 的文档。")
+                return
+            # bm25 排好序的命中列表——记下每个 document_id 的分数和顺序，
+            # 待会按这个顺序展示，不要被 iter_tagging_results() 内部按
+            # created_at 排序打乱。
+            bm25_by_id = {row["document_id"]: row["bm25_score"] for row in hits}
+            ordered_ids = [row["document_id"] for row in hits]
+            records_by_id = {r["document_id"]: r for r in index.iter_tagging_results(document_ids=ordered_ids)}
+            records = [records_by_id[doc_id] for doc_id in ordered_ids if doc_id in records_by_id]
+        else:
+            records = list(index.iter_tagging_results())
 
     if not records:
         print("当前没有任何已打标签的文档。请先运行: python main.py tag")
         return
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    report_path = OUTPUT_DIR / "tags_report.md"
+    report_path = OUTPUT_DIR / ("tags_report_filtered.md" if tag_query else "tags_report.md")
 
     # 三种状态分开统计，报告里也分开展示——"深度打标签"和"基础类型识别"的可信程度
     # 不一样，混在一起看容易把后者的粗糙标签误当成前者那种经过语义判断的结果。
@@ -228,13 +261,20 @@ def run_tags(db_path):
     print(f"共查找到 {len(records)} 份文档。正在生成报告...")
 
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# 文档打标签报告\n\n")
+        if tag_query:
+            f.write(f"# 标签筛选报告：{tag_query}\n\n")
+        else:
+            f.write("# 文档打标签报告\n\n")
         f.write(f"**总计**: {len(records)} 份文档")
         f.write("（" + "，".join(f"{status_label.get(s, s)} {n} 份" for s, n in counts.items()) + "）\n\n")
         for index, r in enumerate(records, start=1):
             tags_str = ", ".join(r["tags"]) if r["tags"] else "(无标签)"
             icon = status_icon.get(r["status"], "❔")
             f.write(f"### {index}. {icon} {status_label.get(r['status'], r['status'])}\n")
+            if bm25_by_id is not None:
+                # bm25 越小代表匹配度越高，跟 search 命令关键词那一路是同一个
+                # 约定，见 semantic_search.py 里的注释。
+                f.write(f"- **标签匹配度(bm25，越小越相关)**: {bm25_by_id[r['document_id']]:.4f}\n")
             f.write(f"- **标签**: {tags_str}\n")
             f.write(f"- **置信度**: {r['confidence']:.2f}\n")
             f.write(f"- **文件**: `{r['path']}`\n")
@@ -316,6 +356,16 @@ def main():
     tags_parser = subparsers.add_parser(
         "tags", help="展示数据库中已打标签文档的标签、reasoning 及置信度", parents=[db_parent]
     )
+    tags_parser.add_argument(
+        "--tag",
+        default=None,
+        help=(
+            "只看标签里包含这个关键词的文档，输出一份单独的筛选报告，不生成"
+            "全量报告。不是精确匹配一个固定的标签名——底层是关键词检索（跟 "
+            "search 命令关键词那一路同一套机制），查询词至少要 3 个字符才能"
+            "命中；不传这个参数就是原来的行为，展示全部文档。"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -330,7 +380,7 @@ def main():
             force=args.force,
         )
     elif args.command == "tags":
-        run_tags(args.db)
+        run_tags(args.db, tag_query=args.tag)
     else:
         parser.print_help()
 
