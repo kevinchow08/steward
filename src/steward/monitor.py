@@ -1,9 +1,14 @@
 """资源监控:采样进程内存 RSS + CPU 占用,记录耗时。基于 psutil 实现,替代旧 Windows 上的 monitor_process.ps1。
 
-GPU 算力占用（相当于"GPU 版的 CPU 占用率"）不测：macOS 上基本只能靠
-powermetrics，这个命令需要 sudo，把一个要 sudo 的子进程调用嵌进日常跑的命令里，
-意味着每次都可能被要求输入密码，这个体验代价要不要接受是个单独的决定，现阶段
-不接受。
+GPU 算力占用（相当于"GPU 版的 CPU 占用率"）不测：`powermetrics` 确实需要
+sudo（实测过，不加 sudo 直接拒绝运行），但这不代表"GPU 数据在 macOS 上必须
+sudo"——2026-09-08 查证过，`macmon`/`mactop` 这类工具靠一个私有 API 拿到同样
+的数据，完全不需要 sudo（`macmon pipe` 能输出 JSON，机器可读）。真正不接入的
+理由是另外两条：(1) 这类工具给的是**整机级别**的 GPU 占用，不是像 psutil 那样
+精确到某个进程，测的时候如果机器上还有别的东西在用 GPU，数字会失真；(2) 这是
+一个额外的外部命令行依赖，要靠 subprocess 调用解析 JSON，跟现在纯 psutil 的
+实现方式不是一回事。真要接的话技术上可行，只是权衡下来现阶段没有足够的需求
+去承担这两个代价，不是能力做不到。
 
 内存这块不受这个限制——Apple Silicon 是统一内存架构，GPU 用的显存和 CPU 用的
 内存是同一块物理内存池，不需要专门的 GPU 工具，只要用 psutil 测对进程就行。
@@ -85,6 +90,9 @@ class ResourceMonitor:
 
         return {
             "elapsed_seconds": elapsed_seconds,
-            "peak_rss_mb": self._peak_rss / (1024 * 1024),  # 字节转 MB,方便人读
+            # 原始字节数，不在这里转换单位——"转成 MB 还是 GB 更好读"是展示层的
+            # 事，交给调用方（main.py 的 _format_bytes()）决定，监控模块只管
+            # 采样，不管怎么显示。
+            "peak_rss_bytes": self._peak_rss,
             "peak_cpu_percent": self._peak_cpu_percent,
         }

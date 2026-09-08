@@ -58,7 +58,7 @@ def run_week1_scan(target_dir):
     print(f"类别分布: {summary['by_type']}")
     print(f"unknown 占比: {summary['unknown_ratio']:.1%}")  # :.1% 是格式化写法,把 0.333 显示成 33.3%
     print(f"耗时: {stats['elapsed_seconds']:.2f} 秒")
-    print(f"峰值内存: {stats['peak_rss_mb']:.1f} MB")
+    print(f"峰值内存: {_format_bytes(stats['peak_rss_bytes'])}")
     print(f"峰值 CPU: {stats['peak_cpu_percent']:.1f}%")
     print(f"结果已写入 {OUTPUT_DIR}")
 
@@ -226,9 +226,9 @@ def run_tag(db_path, max_workers=8, force=False):
     print(f"代码项目: {stats['project_count']} 个（{stats['project_tagged_count']} 个已打标签，"
           f"{stats['project_failed_count']} 个失败）")
     print(f"全管线总耗时: {elapsed:.3f} 秒")
-    print(f"steward 自身进程 峰值内存: {stats['steward_peak_rss_mb']:.1f} MB | 峰值 CPU: {stats['steward_peak_cpu_percent']:.1f}%")
-    if stats["llama_server_peak_rss_mb"] is not None:
-        print(f"llama-server 进程 峰值内存: {stats['llama_server_peak_rss_mb']:.1f} MB | "
+    print(f"steward 自身进程 峰值内存: {_format_bytes(stats['steward_peak_rss_bytes'])} | 峰值 CPU: {stats['steward_peak_cpu_percent']:.1f}%")
+    if stats["llama_server_peak_rss_bytes"] is not None:
+        print(f"llama-server 进程 峰值内存: {_format_bytes(stats['llama_server_peak_rss_bytes'])} | "
               f"峰值 CPU: {stats['llama_server_peak_cpu_percent']:.1f}%")
     else:
         print("llama-server 进程: 没找到，跳过这一路监控（GPU 算力占用暂不测，见 monitor.py 的注释）")
@@ -306,10 +306,67 @@ def run_tags(db_path, tag_query=None):
     print(f"✅ 报告已生成: {report_path}")
 
 
+def _format_bytes(n):
+    """把字节数格式化成人类好读的单位，只用来展示，不参与任何判断逻辑。"""
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{n}B" if unit == "B" else f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}TB"
+
+
+def run_duplicates(target_dir):
+    """扫描一个目录，找出内容完全相同（byte 级）的重复文件，生成报告。
+
+    只读——不删除、不移动任何文件，也不碰数据库；每次都是一次独立的全新
+    扫描，不做增量、不跟 index/tag 共享任何状态。判断依据只看文件内容的
+    SHA256 哈希，不看文件名/大小，详见 duplicates.py 里 find_duplicates()
+    的说明。
+    """
+    import time
+    from steward.duplicates import find_duplicates
+
+    print(f"正在扫描 {target_dir} ...")
+    t0 = time.monotonic()
+    groups = find_duplicates(target_dir)
+    elapsed = time.monotonic() - t0
+
+    if not groups:
+        print(f"没有发现内容完全相同的重复文件。（扫描耗时 {elapsed:.1f} 秒）")
+        return
+
+    total_wasted = sum(g[3] for g in groups)
+    total_files = sum(len(g[1]) for g in groups)
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    report_path = OUTPUT_DIR / "duplicates_report.md"
+
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("# 重复文件报告\n\n")
+        f.write(
+            f"**总计**: {len(groups)} 组重复，共 {total_files} 个文件，"
+            f"可释放空间约 {_format_bytes(total_wasted)}\n\n"
+        )
+        for index, (digest, paths, size, wasted) in enumerate(groups, start=1):
+            f.write(
+                f"### {index}. {len(paths)} 份重复，单份 {_format_bytes(size)}，"
+                f"浪费 {_format_bytes(wasted)}\n"
+            )
+            f.write(f"- **SHA256**: `{digest}`\n")
+            for path in paths:
+                f.write(f"  - `{path}`\n")
+            f.write("\n")
+
+    print(f"共发现 {len(groups)} 组重复，{total_files} 个文件，可释放空间约 {_format_bytes(total_wasted)}")
+    print(f"扫描耗时: {elapsed:.1f} 秒")
+    print(f"✅ 报告已生成: {report_path}")
+
+
 def main():
     # 保留 Week 1 的旧用法：python main.py ~/Downloads
     # 新功能使用子命令：python main.py index ~/Documents
-    if len(sys.argv) > 1 and sys.argv[1] not in {"index", "search", "tag", "tags", "-h", "--help"}:
+    if len(sys.argv) > 1 and sys.argv[1] not in {"index", "search", "tag", "tags", "duplicates", "-h", "--help"}:
         run_week1_scan(sys.argv[1])
         return
 
@@ -400,6 +457,12 @@ def main():
         ),
     )
 
+    duplicates_parser = subparsers.add_parser(
+        "duplicates",
+        help="扫描目录，找出内容完全相同的重复文件（只读，不删除/移动任何文件）",
+    )
+    duplicates_parser.add_argument("target_dir", help="要扫描的目录，例如 ~/Downloads")
+
     args = parser.parse_args()
 
     if args.command == "index":
@@ -414,6 +477,8 @@ def main():
         )
     elif args.command == "tags":
         run_tags(args.db, tag_query=args.tag)
+    elif args.command == "duplicates":
+        run_duplicates(args.target_dir)
     else:
         parser.print_help()
 

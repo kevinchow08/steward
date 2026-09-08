@@ -532,7 +532,7 @@ def run_tagging_pipeline(
         "project_tagged_count": project_tagged_count,
         "project_failed_count": project_failed_count,
     }
-    # 两路资源监控各自的结果都带 "elapsed_seconds"/"peak_rss_mb"/"peak_cpu_percent"
+    # 两路资源监控各自的结果都带 "elapsed_seconds"/"peak_rss_bytes"/"peak_cpu_percent"
     # 这几个同名字段——不能直接把两份 dict 都 update 进 stats，后 update 的会
     # 悄悄覆盖掉先 update 的。加前缀区分开，两边的数据都保留、都看得到。
     for key, value in monitor.stop().items():
@@ -541,6 +541,6 @@ def run_tagging_pipeline(
         for key, value in llama_monitor.stop().items():
             stats[f"llama_server_{key}"] = value
     else:
-        stats["llama_server_peak_rss_mb"] = None
+        stats["llama_server_peak_rss_bytes"] = None
         stats["llama_server_peak_cpu_percent"] = None
     return stats
