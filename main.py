@@ -100,63 +100,86 @@ def run_index(target_dir, db_path, force=False):
     print(f"数据库: {db_path}")
 
 
-def run_search(query, db_path, top_k):
-    """加载本地模型，并在已有 document 索引中搜索，同时打印耗时与统计数据。"""
+def run_search(query, db_path, top_k, candidate_pool_size):
+    """加载本地模型，并在已有 document 索引中搜索，同时打印耗时与统计数据。
+
+    两阶段检索：向量+关键词+标签三路粗筛出一批候选，交给本地 cross-encoder
+    重排序模型（bge-reranker-v2-m3）做最终精排，详见 semantic_search.py
+    的说明。粗筛阶段不再对稠密检索的原始相似度做硬性门槛过滤——"够不够
+    相关"完全交给重排序模型判断，这是撞到"银行流水"这个真实反例（向量
+    检索把一份不相关的 SQL migration 教程排到比真正相关的发票还高）之后
+    改的，重排序模型能正确分辨这种情况（实测那份教程被打到 -10.9 分，
+    真正相关的内容在 -2.6~+0.5 分之间）。
+    """
 
     import time
     from steward import semantic_search
     from steward.embeddings import LocalEmbedder
+    from steward.reranker import LocalReranker
 
     total_start = time.monotonic()
 
-    # 1. 测量本地 Embedding 模型加载耗时
+    # 1. 测量本地模型加载耗时——embedding 模型和重排序模型是两个独立的
+    # 本地模型，各自单独计时，方便看清楚耗时分别花在哪一边。
     print("正在加载本地 embedding 模型...")
     t_model_start = time.monotonic()
     embedder = LocalEmbedder()
-    model_load_seconds = time.monotonic() - t_model_start
+    embed_model_load_seconds = time.monotonic() - t_model_start
+
+    print("正在加载本地重排序模型...")
+    t_reranker_start = time.monotonic()
+    reranker = LocalReranker()
+    rerank_model_load_seconds = time.monotonic() - t_reranker_start
 
     # 2. 执行语义搜索，接收结果和详细耗时/计数
     results, stats = semantic_search.search_documents(
         query,
         embedder,
+        reranker,
         db_path=db_path,
         top_k=top_k,
+        candidate_pool_size=candidate_pool_size,
     )
 
     total_seconds = time.monotonic() - total_start
 
     if not results:
-        # 三路（向量/关键词/标签）全部没有真正相关的命中，如实说没找到，
-        # 不再像以前那样因为向量检索没有相关度门槛而强行凑出 top_k 个
-        # 看起来正常、实际不相关的结果。
+        # 三路粗筛全部没有候选，或者候选交给重排序之后全部低于相关度门槛，
+        # 如实说没找到，不强行凑出 top_k 个看起来正常、实际不相关的结果。
         print("没有找到足够相关的内容。")
     else:
         for index, result in enumerate(results, start=1):
-            # 这个 score 是三路检索（向量+关键词+标签）融合排序（RRF）之后的
-            # 分数，不是相似度百分比，数值本身很小、没有直接意义，只用来决定
-            # 排在第几，不要按"匹配度多少%"去解读。
-            print(f"{index}. 融合排序分数={result.score:.4f}")
+            # 这个 score 是重排序模型给出的原始相关性分数，不是 0~1 的
+            # 相似度百分比，也不再是 RRF 融合分数——数值大致在 -11~+1 这个
+            # 区间，越高越相关，不要按"匹配度多少%"去解读。
+            print(f"{index}. 重排序分数={result.score:.4f}")
             print(f"   文件: {result.path}")
             print(f"   chunk: {result.chunk_index}")
             print(f"   片段: {result.text}")
-        # document_count 是过滤/融合之后的完整命中数（不受 top_k 截断），
-        # 比展示出来的这几条多，说明还有更多真正相关的结果没显示，如实说明，
-        # 不要让 --top_k 悄悄截断掉用户看不到的其余结果。
+        # document_count 是候选池（candidate_pool_size 个）里经过重排序、
+        # 通过相关度门槛的数量，不是"全语料里有多少真正相关"——粗筛阶段
+        # 已经把候选面限制在了候选池大小以内，语料里可能还有没进入候选池、
+        # 因此没被重排序看到的相关文档，想要不受候选池上限影响的完整列表，
+        # 用 `tags --tag` 按标签穷举查。
         if stats["document_count"] > len(results):
-            print(f"（共 {stats['document_count']} 个结果通过相关度门槛，这里只展示前 {len(results)} 个，"
-                  "加大 --top-k 看更多）")
+            print(f"（候选池 {stats['candidate_pool_size']} 个里，{stats['document_count']} 个通过重排序的"
+                  f"相关度判断，这里只展示前 {len(results)} 个，加大 --top-k 看更多；"
+                  "如果想要不受候选池上限影响的完整列表，用 tags --tag 按标签穷举查）")
 
     # 3. 打印性能与耗时监控信息
     print("-" * 50)
     print("【性能与耗时统计】")
-    print(f"最终命中文档: {stats['document_count']} 个 | 比较片段(chunks): {stats['chunk_count']} 个")
+    print(f"候选池大小: {stats['candidate_pool_size']} 个 | 通过重排序: {stats['document_count']} 个 "
+          f"| 比较片段(chunks): {stats['chunk_count']} 个")
     print(f"向量检索命中: {stats['dense_hit_count']} 个文档 | 关键词检索命中: {stats['sparse_hit_count']} 个文档 "
           f"| 标签检索命中: {stats['tag_hit_count']} 个文档")
-    print(f"模型加载耗时: {model_load_seconds:.3f} 秒")
+    print(f"embedding 模型加载耗时: {embed_model_load_seconds:.3f} 秒")
+    print(f"重排序模型加载耗时: {rerank_model_load_seconds:.3f} 秒")
     print(f"Query 向量化: {stats['query_embed_seconds']:.3f} 秒")
     print(f"向量检索耗时: {stats['vector_search_seconds']:.3f} 秒")
     print(f"关键词检索耗时: {stats['keyword_search_seconds']:.3f} 秒")
     print(f"标签检索耗时: {stats['tag_search_seconds']:.3f} 秒")
+    print(f"重排序耗时: {stats['rerank_seconds']:.3f} 秒")
     print(f"搜索总耗时:   {total_seconds:.3f} 秒")
 
 
@@ -332,6 +355,16 @@ def main():
         default=5,
         help="返回结果数量，默认 5",
     )
+    search_parser.add_argument(
+        "--candidates",
+        type=int,
+        default=80,
+        help=(
+            "向量+关键词+标签粗筛阶段捞出多少个候选交给重排序模型精排，默认 80。"
+            "数字越大，语料里真正相关但排名靠后的内容越不容易被粗筛漏掉，但重排序"
+            "耗时跟这个数字线性增长（实测约每个候选 100~120 毫秒）。"
+        ),
+    )
 
     tag_parser = subparsers.add_parser(
         "tag", help="对已有索引的文档批量打标签（开放式 reasoning + tags）", parents=[db_parent]
@@ -372,7 +405,7 @@ def main():
     if args.command == "index":
         run_index(args.target_dir, args.db, force=args.force)
     elif args.command == "search":
-        run_search(args.query, args.db, args.top_k)
+        run_search(args.query, args.db, args.top_k, args.candidates)
     elif args.command == "tag":
         run_tag(
             args.db,

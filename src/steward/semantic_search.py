@@ -1,4 +1,6 @@
-"""基于本地 SQLite 索引执行语义搜索——向量检索 + 关键词检索的混合排序。"""
+"""基于本地 SQLite 索引执行语义搜索——向量+关键词+标签三路粗筛，
+再用 cross-encoder 重排序做最终精排（先粗筛后精排，标准的两阶段 RAG 检索
+设计，见 reranker.py 的说明）。"""
 
 from dataclasses import dataclass
 
@@ -22,40 +24,74 @@ class SearchResult:
 # 融合结果，见 _rrf_merge() 的说明。
 _RRF_K = 60
 
-# 稠密检索（向量相似度）的最低相关度门槛——原始余弦相似度低于这个值的候选，
-# 不管排第几都不算"真正相关"，直接过滤掉，不进入下面的排名融合——RRF 融合
-# 排序只看排名不看原始分数大小，不做这道过滤的话，一个语料里根本不存在的
-# 话题也会被强行凑出 top_k 个"看起来正常"的结果，融合分数的数值量级跟真正
-# 相关的查询没有可辨识的区别，用户没法从结果本身看出"这次是真的搜到了"还是
-# "纯粹是矬子里拔将军"。关键词检索（FTS5 MATCH）不需要类似的门槛：只要命中
-# 了，说明查询词真的逐字出现在文本里，本身就是有意义的信号，不存在"匹配到了
-# 但其实不相关"这种模糊地带。
+# RRF 融合排序之后，取排名前多少个候选交给重排序模型做精排——重排序模型
+# 没法像向量检索那样提前把全部语料算好、查询来了只需要比对，每个候选都要
+# 现跑一次模型推理（实测 bge-reranker-v2-m3 在这台机器上大概 100~120 毫秒
+# 一对），对全部 9400 个 chunk 逐一打分要 15~38 分钟，扛不住，必须先用便宜
+# 的向量+关键词+标签检索粗筛出一小批候选，只对这一小批做精细判断。
 #
-# 0.5 这个数字目前只有 4 个真实查询词的证据支撑（对着一个语料里确实不存在
-# 的话题"露营装备推荐"查询，最高相似度只有 0.485；对着 3 个真实存在的话题
-# 查询，最低的有 0.6+），样本量不够下"这是稳定分界"的结论，只能算"当前证据
-# 支撑的一个估计值"。**这个数字是跟具体 embedding 模型 + 具体语料的内容分布
-# 绑定的，不是一个通用常数**——换一个 embedding 模型（不同模型的向量空间
-# 几何形状不同，"多相似算相似"这把尺子会整体平移）、或者语料话题范围发生
-# 大幅变化，都需要重新用真实查询词测一遍再校准，不能假设 0.5 能直接照搬。
-# 同一批文件、同一个模型重新建索引不受影响——embedding 是确定性计算，
-# 同样的文本喂给同样的模型算出来的向量是一样的。
+# 这一步的原则是"宁可多捞、不要漏掉"（检索阶段负责召回率，精确度交给重排序
+# 阶段负责，这是检索增强生成领域的标准分工）——RRF 融合排序本身已经不再
+# 对稠密检索的原始相似度做任何硬性门槛过滤（之前版本在这里卡了一个
+# _MIN_DENSE_SCORE=0.5，撞到过真实反例："银行流水"这个查询里，真正相关的
+# 发票原始相似度只有 0.4746，会被 0.5 的门槛误伤掉，而一份完全不相关的
+# SQL migration 教程原始相似度有 0.545，反而能通过门槛——说明向量相似度
+# 这个信号本身就不够可靠，硬卡阈值卡的位置很容易卡错，不如把"够不够相关"
+# 这个判断完全交给下面更准的重排序模型，检索阶段只管把候选面撒宽一点）。
 #
-# 曾经试过一个"不用绝对数值，看这次查询的分数比全库均值高几个标准差"的
-# 动态方案，指望它能自动适应模型/语料变化——实测下来效果不如直接卡绝对值：
-# "露营装备推荐"最高分离均值 4.29 个标准差，"工程师思维"是 4.46 个标准差，
-# 两者差距很小，没有绝对分数（0.485 vs 0.6+）分得开，所以没有采用，还是用
-# 更简单、目前证据更支持的绝对阈值，但要如实承认它的适用范围窄。
-_MIN_DENSE_SCORE = 0.5
+# 80 这个数字是参考"两阶段检索：向量捞前 50~100，精排到前几个"这个业界
+# 惯用做法定的，不是精确算出来的——多捞一些，重排序的耗时会跟着线性涨
+# （每对约 100~120 毫秒，80 个大概 8~10 秒），是候选池大小和查询延迟之间
+# 的权衡，可以用 --candidates 参数调。
+DEFAULT_CANDIDATE_POOL_SIZE = 80
+
+# 重排序模型给出的最低相关度门槛——原始分数（不是 0~1 的概率，见
+# reranker.py 里 LocalReranker.score() 为什么不用 sigmoid 的说明）低于这个
+# 值的候选，不算"真正相关"，直接过滤掉。
+#
+# 真正相关的案例分数在 -2.6~+0.5 之间（"投资建议"-1.384、"工程师思维"
+# -2.637、"不动产登记"+0.534——分数越高越相关，+0.534 是最贴切的一次，
+# 不动产查询单本身就是查询词的完美对应）。
+#
+# 第一版按"完全不相关"的极端案例（"银行流水"对应的 SQL migration 教程
+# -10.945、"露营装备推荐"对应的一份不相关发票 -10.984）定过 -5.0，实测
+# 直接暴露了真实回归：接入候选池上限之后重新测"露营装备推荐"（语料里
+# 确实没有这个话题），冒出了 19 个分数在 -3.4~-3.55 之间、明显不相关的
+# 结果（一个 App 版本号 JSON、一份 Nest 教程、一段 base64 编码）——说明
+# "完全不相关"不是只会落在 -11 这种极端值附近，也会落在 -3~-4 这个更
+# "暧昧"的中间地带，只用两个最极端的反例校准，覆盖不到这个区间。改成
+# -2.5（卡在已知最差的真正相关案例 -2.637 附近，留一点点余量）之后重测：
+# "露营装备推荐"正确清零，之前验证过的"报销发票"（62 个通过，top 3 全对）/
+# "工程师思维"（9 个通过，排序对）/"不动产登记"（4 个通过，top1 精确命中）/
+# "微服务"（19 个通过，top 3 全对）都没有被误伤。
+#
+# 这依然只是拿有限样本校准出来的估计值，跟 _MIN_DENSE_SCORE 当初"只有
+# 4 个查询词的证据"是同一类性质，换 reranker 模型、或者语料话题分布发生
+# 大幅变化，需要重新用真实查询词测一遍——这次踩的坑已经说明"边界案例
+# 只测最极端的两头是不够的"，以后调这个数字要多测几个"确实不相关但也
+# 不是特别离谱"的中间地带案例，不能只看最好和最差两个极端。
+_MIN_RERANK_SCORE = -2.5
 
 
-def search_documents(query, embedder, db_path=DEFAULT_DB_PATH, top_k=5):
-    """混合检索：向量语义相似度 + 关键词精确匹配（FTS5 + bm25）+ 标签关键词
-    匹配（同样是 FTS5 + bm25，但匹配的是文档整体的标签，不是某个 chunk），
-    三路结果按排名融合（Reciprocal Rank Fusion），不是按原始分数加权——三路
-    分数的数值尺度完全不是一回事（余弦相似度是 0~1 的有界值，bm25 是跟语料
-    规模有关的无界值），硬要按百分比加权需要手调系数，而且没有验证数据支撑，
-    不可靠。RRF 只看各自的排名，不比较原始分数，天然公平。
+def search_documents(
+    query,
+    embedder,
+    reranker,
+    db_path=DEFAULT_DB_PATH,
+    top_k=5,
+    candidate_pool_size=DEFAULT_CANDIDATE_POOL_SIZE,
+):
+    """两阶段检索：先粗筛，后精排。
+
+    阶段一（粗筛，负责召回率，宁可多捞、不要漏掉）：向量语义相似度 +
+    关键词精确匹配（FTS5 + bm25）+ 标签关键词匹配（同样是 FTS5 + bm25，
+    但匹配的是文档整体的标签，不是某个 chunk）三路结果按排名融合
+    （Reciprocal Rank Fusion），不是按原始分数加权——三路分数的数值尺度
+    完全不是一回事（余弦相似度是 0~1 的有界值，bm25 是跟语料规模有关的
+    无界值），硬要按百分比加权需要手调系数，而且没有验证数据支撑，不
+    可靠。RRF 只看各自的排名，不比较原始分数，天然公平。融合排序取前
+    `candidate_pool_size` 个，作为送去精排的候选池，这一步的排名/分数
+    只用来"选哪些候选"，不是最终展示用的分数。
 
     标签这一路存在的意义：向量/关键词检索都是按 chunk 粒度算分的，一份文档
     整体的主题如果没有集中体现在某一个 800 字符的 chunk 里，会在那两路检索
@@ -68,10 +104,10 @@ def search_documents(query, embedder, db_path=DEFAULT_DB_PATH, top_k=5):
     至少要 3 个字符才能命中——2 字短查询这两路都会搜不到东西，这是已知的
     设计代价，不是 bug，向量检索没有长度限制，能接住这类短查询。
 
-    向量检索这一路还有一个最低相关度门槛（见 _MIN_DENSE_SCORE），原始相似度
-    不够的候选不会进入这一路的排名——所以查询一个语料里根本不存在的话题，
-    可能三路都是空结果，`document_count` 会是 0 或很小的数字，不会被强行
-    凑出 top_k 个看起来正常、实际不相关的结果。
+    阶段二（精排，负责精确度）：候选池交给 cross-encoder 重排序模型
+    （reranker.py 的 LocalReranker），查询和每个候选的实际内容做真正的
+    交互式判断，用重排序自己的分数（见 _MIN_RERANK_SCORE）决定最终排序、
+    以及"够不够真的相关"——不再依赖粗筛阶段任何一路的原始分数去判断相关性。
 
     返回 (results, stats) 二元组，包含命中结果列表与详细耗时/计数统计。
     """
@@ -98,16 +134,47 @@ def search_documents(query, embedder, db_path=DEFAULT_DB_PATH, top_k=5):
         tag_ranking = _tag_search(index, query)
         tag_seconds = time.monotonic() - t3
 
-    merged = _rrf_merge(dense_ranking, sparse_ranking, tag_ranking)
-    results = merged[:top_k]
+    candidates = _rrf_merge(dense_ranking, sparse_ranking, tag_ranking)[:candidate_pool_size]
+
+    t4 = time.monotonic()
+    reranked_all = _rerank(reranker, query, candidates)  # 完整排序，还没过滤
+    rerank_seconds = time.monotonic() - t4
+
+    reranked = [r for r in reranked_all if r.score >= _MIN_RERANK_SCORE]
+    results = reranked[:top_k]
+
+    # 诊断信号，不参与任何判断逻辑——第一名和第二名的分差（gap）。
+    #
+    # 本来是想验证"检索增强生成领域常提的 gap 信号（比如 TARG 那类工作）能不能
+    # 替代/补充 _MIN_RERANK_SCORE 这种固定阈值"，用 tests/run_search_regression.py
+    # 跑过 13 个真实案例后，**已经拿到明确的反证，这条路径不可行**：
+    # `宠物疫苗接种记录`（该判定不相关的假阳性）gap 反而很大（1.674，因为
+    # 它虽然分数低，但比全库倒数第二名还是拉开了距离）；`日本签证`/`财务凭证`
+    # （真正该判定相关、只是好答案不止一个）gap 反而接近 0。gap 离不开"绝对
+    # 分数本身够不够高"这个前提，脱离绝对分数单独用会把结论判反，不是"数据还
+    # 不够多"，是这个信号本身在我们的真实数据上不具备独立判别力。
+    #
+    # 继续保留这两个字段是因为它们现在确实在被用——tests/run_search_regression.py
+    # 每次跑回归集都会打印，是留存下来的真实观测数据，不是猜想着"以后可能用得上"
+    # 的死代码；只是不要再假设未来会拿它当正式判断依据，除非出现新的、有说服力
+    # 的证据。
+    top1_top2_gap = None
+    if len(reranked_all) >= 2:
+        top1_top2_gap = reranked_all[0].score - reranked_all[1].score
+    elif len(reranked_all) == 1:
+        top1_top2_gap = float("inf")  # 只有一个候选，没有"第二名"可比，视为无穷大的分差
 
     stats = {
         "query_embed_seconds": query_embed_seconds,
+        "rerank_seconds": rerank_seconds,
+        "candidate_pool_size": len(candidates),
         "vector_search_seconds": dense_seconds,
         "keyword_search_seconds": sparse_seconds,
         "tag_search_seconds": tag_seconds,
         "chunk_count": chunk_count,
-        "document_count": len(merged),
+        "top1_score": reranked_all[0].score if reranked_all else None,
+        "top1_top2_gap": top1_top2_gap,
+        "document_count": len(reranked),
         "dense_hit_count": len(dense_ranking),
         "sparse_hit_count": len(sparse_ranking),
         "tag_hit_count": len(tag_ranking),
@@ -121,11 +188,11 @@ def _dense_search(index, model_id, query_vector, normalized):
     矩阵乘法算余弦相似度，不是之前那种逐行 Python 循环手算点积再比较——语料
     一大，矩阵运算比 Python 循环快得多。
 
-    同一个文档命中好几个 chunk 时只保留分数最高的那个；最高分低于
-    _MIN_DENSE_SCORE 的文档直接不进入返回结果，不管它在全库里排第几——
-    这一步是本函数的返回值语义变化：以前"返回全部命中"，现在"只返回真正
-    相关的命中"，返回的列表可能比全库文档数少得多，甚至是空列表（说明这次
-    查询在向量语义这一路上没找到真正相关的内容）。
+    同一个文档命中好几个 chunk 时只保留分数最高的那个，返回按分数从高到低
+    排好序的全部文档——不在这里对原始相似度做任何硬性门槛过滤（早期版本
+    在这里卡过 _MIN_DENSE_SCORE=0.5，已经撤掉，见上面 DEFAULT_CANDIDATE_
+    POOL_SIZE 的注释）。这一路只负责"粗筛、尽量别漏掉"，"够不够真的相关"
+    这个判断完全交给后面的重排序模型。
     """
     rows = list(index.iter_search_vectors(model_id))
     if not rows:
@@ -165,10 +232,7 @@ def _dense_search(index, model_id, query_vector, normalized):
             )
 
     ranking = sorted(best_by_document.items(), key=lambda item: item[1][0], reverse=True)
-    filtered = [
-        (doc_id, result) for doc_id, (score, result) in ranking if score >= _MIN_DENSE_SCORE
-    ]
-    return filtered, len(rows)
+    return [(doc_id, result) for doc_id, (_, result) in ranking], len(rows)
 
 
 def _sparse_search(index, query):
@@ -216,6 +280,32 @@ def _tag_search(index, query):
             ),
         ))
     return ranking
+
+
+def _rerank(reranker, query, candidates):
+    """对 RRF 粗筛出来的候选池做精排：每个候选原来展示用的那段文本
+    （chunk 正文，或者标签命中给的标签原文）拿去跟查询一起喂给重排序
+    模型，重排序自己给出的分数直接替换掉候选原本的 RRF 分数（不再是
+    "排名贡献值的累加"这种没有直接意义的数字，是重排序模型真正判断出来
+    的"这俩有多相关"），按这个新分数从高到低排序。
+
+    返回**完整**的排好序的列表，不在这里过滤——过滤（_MIN_RERANK_SCORE）
+    挪到调用方做，是因为回归测试脚本需要看到完整排序（包括没通过门槛的
+    候选），才能算出"第一名和第二名分差多大"这类诊断信号，如果在这里就
+    把没通过门槛的候选丢掉，这个信号就没法算了。
+    """
+    if not candidates:
+        return []
+
+    texts = [c.text for c in candidates]
+    scores = reranker.score(query, texts)
+
+    scored = [
+        SearchResult(path=c.path, score=score, chunk_index=c.chunk_index, text=c.text)
+        for c, score in zip(candidates, scores)
+    ]
+    scored.sort(key=lambda r: r.score, reverse=True)
+    return scored
 
 
 def _rrf_merge(*rankings):

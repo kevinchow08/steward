@@ -1,0 +1,76 @@
+[
+  {
+    "query": "银行流水",
+    "expect": "match",
+    "should_not_appear_in_top": ["会议室预定系统"],
+    "note": "已知真实案例：向量检索曾把一份完全不相关的 SQL migration 教程排到第一名，靠重排序修复。语料里没有真正意义上的银行流水文档，所以不校验第一名具体是谁，只校验那份已知的错误案例不能再出现。"
+  },
+  {
+    "query": "露营装备推荐",
+    "expect": "empty",
+    "note": "语料里确实没有这个话题，应该正确返回空结果。"
+  },
+  {
+    "query": "报销发票",
+    "expect": "match",
+    "top_result_should_contain": ["报销相关"],
+    "note": "报销相关目录下有大量真实发票，应该轻松命中。"
+  },
+  {
+    "query": "工程师思维",
+    "expect": "match",
+    "top_result_should_contain": ["工程师", "Gemini关于2026年个人计划"],
+    "note": "真实带这个标签的文档是 工程师的投资建议.txt，但同一批对话里其他文档话题相近，接受任意一个合理答案。"
+  },
+  {
+    "query": "不动产登记",
+    "expect": "match",
+    "top_result_should_contain": ["不动产"],
+    "note": "语料里有且只有一份精确对应的文档（不动产信息查询结果单.pdf），应该稳定命中第一名。"
+  },
+  {
+    "query": "微服务",
+    "expect": "match",
+    "top_result_should_contain": ["微服务", "Nest 通关秘籍"],
+    "note": "Nest 通关秘籍课程里有大量真实讲微服务的内容。"
+  },
+  {
+    "query": "日本签证",
+    "expect": "match",
+    "top_result_should_contain": ["签证"],
+    "note": "语料里有真实的日本签证材料目录。"
+  },
+  {
+    "query": "财务凭证",
+    "expect": "match",
+    "top_result_should_contain": ["报销相关", "发票"],
+    "note": "跟报销发票是同一批语料，应该同样干净。"
+  },
+  {
+    "query": "收入证明",
+    "expect": "match",
+    "top_result_should_contain": ["收入"],
+    "note": "语料里有一份专门的自由职业者收入来源说明。"
+  },
+  {
+    "query": "投资建议",
+    "expect": "match",
+    "top_result_should_contain": ["投资", "Bogleheads", "ETF", "金融"],
+    "note": "对话List 目录下有大量真实的投资讨论。"
+  },
+  {
+    "query": "理财",
+    "expect": "match",
+    "note": "只有 2 个字符，关键词/标签检索(trigram)天然搜不到，只靠向量检索单独工作，不校验具体第一名，观察排序合不合理即可。"
+  },
+  {
+    "query": "宠物疫苗接种记录",
+    "expect": "empty",
+    "note": "语料里确实没有宠物相关内容，但已知在 _MIN_RERANK_SCORE=-2.5 下会有 1 个弱假阳性（一份 Nest 聊天室后端开发文档，分数 -2.41，刚好卡在门槛内侧）——这条案例目前预期会失败，故意留着用来追踪这个已知的小瑕疵，不是遗漏。"
+  },
+  {
+    "query": "离婚协议书模板",
+    "expect": "note_only",
+    "note": "语料里没有真正意义上的离婚协议书模板，但有相关但不完全对应的内容（marriage problem 聊天记录、partner.md、签证表格的婚姻状况字段），不是一个干净的零匹配案例，不做严格判定，只记录结果供人工复核。"
+  }
+]

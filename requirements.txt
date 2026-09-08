@@ -5,6 +5,7 @@ python-docx
 beautifulsoup4
 numpy
 sentence-transformers
+FlagEmbedding
 openai
 httpx
 openpyxl
