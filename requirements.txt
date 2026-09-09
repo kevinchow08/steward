@@ -11,3 +11,4 @@ httpx
 openpyxl
 xlrd
 olefile
+send2trash

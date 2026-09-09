@@ -1,4 +1,6 @@
-"""入口:接收目录参数,串联 scan -> index -> tag -> report。"""
+"""入口:子命令形式（index / search / tag / tags / duplicates），串联
+scan -> index -> tag -> search/duplicates 这条链路。
+"""
 
 import argparse
 import sys
@@ -10,7 +12,6 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR / "src"))
 
-RULES_PATH = BASE_DIR / "config" / "rules.yaml"
 OUTPUT_DIR = BASE_DIR / "output"
 
 # 之前这里自己又定义了一份 DEFAULT_DB_PATH（指向项目源码目录），跟
@@ -18,49 +19,6 @@ OUTPUT_DIR = BASE_DIR / "output"
 # 那边的默认路径完全不会影响这里，是真实的 bug，不是"两处保持一致就行"的
 # 重复定义。改成直接从 document_index 引用同一个常量，只有一个真正的来源。
 from steward.document_index import DEFAULT_DB_PATH  # noqa: E402
-
-
-def run_week1_scan(target_dir):
-    from steward import monitor, report, scan
-    from steward.classifiers import rule_based
-
-    # 创建解析器,此时它还不认识任何参数,只是个空壳
-    parser = argparse.ArgumentParser(description="端侧文件类型分类(Week 1,纯规则)")
-
-    # 登记一个参数:名字不带 "--" 前缀,所以是"位置参数"(必填,按顺序传,不用写参数名)
-    # 比如 `python main.py ~/Downloads` 里的 ~/Downloads 就是传给它的值
-    parser.add_argument("target_dir", help="要扫描的目录,比如 ~/Downloads")
-
-    # 真正读 sys.argv 并按上面登记的规则解析,返回一个 Namespace 对象
-    # 之后用 args.target_dir 取值;缺参数/参数名打错/多传参数,这一步会自动报错退出
-    args = parser.parse_args([target_dir])
-
-    rules = rule_based.load_rules(RULES_PATH)
-    res_monitor = monitor.ResourceMonitor()
-
-    records = []
-    for file_path in scan.iter_files(args.target_dir):
-        result = rule_based.classify_file(file_path, rules)
-        # {"path": ..., **result}:字典解包,把 result 里的 basic_type / matched_by 两个键
-        # 平铺展开合并进新字典,等价于 {"path": str(file_path), "basic_type": ..., "matched_by": ...}
-        records.append({"path": str(file_path), **result})
-        res_monitor.sample()
-
-    stats = res_monitor.stop()
-    summary = report.summarize(records)
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)  # exist_ok=True:目录已存在也不报错
-    report.write_results(records, OUTPUT_DIR / "results.json")
-    # 同样是字典解包,把 stats(耗时+内存+CPU)和 summary(类别分布)两个 dict 合并成一个再写盘
-    report.write_baseline_report({**stats, **summary}, OUTPUT_DIR / "baseline.json")
-
-    print(f"共处理 {summary['total_files']} 个文件")
-    print(f"类别分布: {summary['by_type']}")
-    print(f"unknown 占比: {summary['unknown_ratio']:.1%}")  # :.1% 是格式化写法,把 0.333 显示成 33.3%
-    print(f"耗时: {stats['elapsed_seconds']:.2f} 秒")
-    print(f"峰值内存: {_format_bytes(stats['peak_rss_bytes'])}")
-    print(f"峰值 CPU: {stats['peak_cpu_percent']:.1f}%")
-    print(f"结果已写入 {OUTPUT_DIR}")
 
 
 def run_index(target_dir, db_path, force=False):
@@ -316,6 +274,26 @@ def _format_bytes(n):
     return f"{size:.1f}TB"
 
 
+def _report_tag_for_dir(target_dir):
+    """把目录路径变成一段能安全嵌进文件名的标识，用来区分"扫描不同目录
+    产生的报告"——原来 duplicates_report.md 这类文件名是写死的，扫完
+    ~/Downloads 再扫 ~/Documents，第二次会把第一次的报告覆盖掉，这是真实
+    bug，不是"就该覆盖"的预期行为（预期行为是"同一个目录重复跑，新报告
+    覆盖旧报告"，不同目录不该互相覆盖）。
+
+    只用目录名（比如"Downloads"）当前缀不够——两个不同路径下都可能有一个
+    叫"Downloads"的文件夹，会撞车。所以在人类可读的目录名后面缀一段基于
+    完整解析路径算出来的短哈希，既保留可读性，又能保证不同目录不会撞到
+    同一个文件名。
+    """
+    import hashlib
+
+    resolved = Path(target_dir).expanduser().resolve()
+    readable = resolved.name or "root"  # 根目录（比如"/"）本身没有 name，兜底一个字符串
+    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:8]
+    return f"{readable}_{digest}"
+
+
 def run_duplicates(target_dir):
     """扫描一个目录，找出内容完全相同（byte 级）的重复文件，生成报告。
 
@@ -340,10 +318,10 @@ def run_duplicates(target_dir):
     total_files = sum(len(g[1]) for g in groups)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    report_path = OUTPUT_DIR / "duplicates_report.md"
+    report_path = OUTPUT_DIR / f"duplicates_report_{_report_tag_for_dir(target_dir)}.md"
 
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write("# 重复文件报告\n\n")
+        f.write(f"# 重复文件报告（{target_dir}）\n\n")
         f.write(
             f"**总计**: {len(groups)} 组重复，共 {total_files} 个文件，"
             f"可释放空间约 {_format_bytes(total_wasted)}\n\n"
@@ -363,13 +341,116 @@ def run_duplicates(target_dir):
     print(f"✅ 报告已生成: {report_path}")
 
 
-def main():
-    # 保留 Week 1 的旧用法：python main.py ~/Downloads
-    # 新功能使用子命令：python main.py index ~/Documents
-    if len(sys.argv) > 1 and sys.argv[1] not in {"index", "search", "tag", "tags", "duplicates", "-h", "--help"}:
-        run_week1_scan(sys.argv[1])
+def run_duplicates_clean(target_dir):
+    """交互式清理重复文件——逐组确认后，把除保留项外的文件移入系统废纸篓
+    （可撤销，不是永久删除）。
+
+    关键行为，跟只读版本的 run_duplicates() 不一样：
+    - 会真的改动文件系统（移入废纸篓），所以每一组都要求用户明确确认，
+      不接受任何"默认全部执行"的快捷方式——delete 是这个项目第一个真正
+      的"行动层"能力，宁可啰嗦也不要图快。
+    - 每一次成功的删除都会追加写一条操作日志（duplicates_cleanup_log.jsonl），
+      记录删的是哪个文件、保留的是哪个、什么时候删的——废纸篓本身能撤销，
+      但"这次操作到底动了哪些文件"这件事不该只靠翻废纸篓才能查。
+    - 这份日志记的是"某个时间点执行过这个动作"，不是"这个文件现在是不是
+      还在废纸篓里"——如果用户后来自己在 Finder 里把某个文件"放回原处"
+      (Put Back)还原了，日志不会跟着更新，这是预期行为，不是 bug：日志
+      是操作历史，不是实时状态，就像 git commit 记录不会因为后来被 revert
+      就从历史里消失一样。还原这个动作完全靠 macOS 系统自己的废纸篓机制
+      (send2trash 在这台机器上实测调用的是 CoreServices 的
+      FSMoveObjectToTrashSync，就是 Finder"移到废纸篓"用的同一套系统
+      API，"放回原处"能力是系统原生就有的)，这里不重复实现。
+    - 依然不碰数据库、不碰任何不在重复分组里的文件。
+    """
+    import json
+    from datetime import datetime
+
+    from steward.duplicates import find_duplicates, move_to_trash, pick_keeper
+
+    print(f"正在扫描 {target_dir} ...")
+    groups = find_duplicates(target_dir)
+
+    if not groups:
+        print("没有发现内容完全相同的重复文件，没有可清理的。")
         return
 
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # 这个日志是追加写（"a" 模式），不是覆盖写，所以严格说不会丢数据——但
+    # 不同目录的清理记录混在同一个文件里，不方便按目录回看，跟报告文件一样
+    # 按目录区分开，保持两者行为一致、可预期。
+    log_path = OUTPUT_DIR / f"duplicates_cleanup_log_{_report_tag_for_dir(target_dir)}.jsonl"
+
+    total_deleted = 0
+    total_freed = 0
+
+    print(f"共发现 {len(groups)} 组重复，逐组确认。")
+    print("每组输入：回车=接受默认建议 / 数字=改选要保留第几份 / s=跳过这组 / q=退出\n")
+
+    try:
+        for index, (digest, paths, size, _wasted) in enumerate(groups, start=1):
+            keeper, to_delete = pick_keeper(paths)
+
+            print(f"--- 第 {index}/{len(groups)} 组（共 {len(paths)} 份，单份 {_format_bytes(size)}）---")
+            for i, path in enumerate(paths, start=1):
+                try:
+                    mtime_str = datetime.fromtimestamp(Path(path).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                except (FileNotFoundError, PermissionError):
+                    mtime_str = "未知"
+                marker = "  ← 默认建议保留" if path == keeper else ""
+                print(f"  [{i}] {path}\n      修改时间: {mtime_str}{marker}")
+
+            choice = input("请选择: ").strip().lower()
+
+            if choice == "q":
+                print("已退出，后续未处理的组不受影响。\n")
+                break
+            if choice == "s" or choice == "n":
+                print("已跳过这一组，不做任何改动。\n")
+                continue
+            if choice == "":
+                pass  # 接受默认的 keeper/to_delete
+            elif choice.isdigit() and 1 <= int(choice) <= len(paths):
+                keeper = paths[int(choice) - 1]
+                to_delete = [p for p in paths if p != keeper]
+            else:
+                print("没识别这个输入，按跳过处理，这一组不做任何改动。\n")
+                continue
+
+            for path in to_delete:
+                try:
+                    move_to_trash(path)
+                except Exception as e:
+                    print(f"  [Warning] 移入废纸篓失败，跳过: {path}（{e}）")
+                    continue
+
+                total_deleted += 1
+                total_freed += size
+                with open(log_path, "a", encoding="utf-8") as f:
+                    f.write(
+                        json.dumps(
+                            {
+                                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                                "sha256": digest,
+                                "kept_path": str(keeper),
+                                "deleted_path": str(path),
+                                "size_bytes": size,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+                print(f"  已移入废纸篓: {path}")
+            print()
+    except KeyboardInterrupt:
+        print("\n已中断，已经确认过的操作不受影响，还没处理的组不会有任何改动。")
+
+    print("-" * 50)
+    print(f"共删除 {total_deleted} 个文件，释放约 {_format_bytes(total_freed)}——都在系统废纸篓里，可以还原。")
+    if total_deleted:
+        print(f"操作日志: {log_path}")
+
+
+def main():
     # 四个子命令都要一份一模一样的 --db 参数（路径、默认值、help 文案全部相同），
     # 之前是每个子命令各自重复写一遍。argparse 自带 parents= 机制专门解决这种
     # "多个子命令共享同一组参数"的情况：先在一个不参与解析、只当"参数模板"的
@@ -459,9 +540,17 @@ def main():
 
     duplicates_parser = subparsers.add_parser(
         "duplicates",
-        help="扫描目录，找出内容完全相同的重复文件（只读，不删除/移动任何文件）",
+        help="扫描目录，找出内容完全相同的重复文件（默认只读；加 --clean 交互式清理）",
     )
     duplicates_parser.add_argument("target_dir", help="要扫描的目录，例如 ~/Downloads")
+    duplicates_parser.add_argument(
+        "--clean",
+        action="store_true",
+        help=(
+            "交互式清理：每组重复文件逐组确认后，把除保留项外的文件移入系统"
+            "废纸篓（可撤销，不是永久删除）。不加这个参数就还是原来的只读报告。"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -478,7 +567,10 @@ def main():
     elif args.command == "tags":
         run_tags(args.db, tag_query=args.tag)
     elif args.command == "duplicates":
-        run_duplicates(args.target_dir)
+        if args.clean:
+            run_duplicates_clean(args.target_dir)
+        else:
+            run_duplicates(args.target_dir)
     else:
         parser.print_help()
 

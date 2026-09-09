@@ -1,5 +1,12 @@
-"""精确重复文件检测——只判断"内容 byte 级完全一样"，不做近似相似判断，
-不做任何删除/移动，纯只读扫描 + 报告。
+"""精确重复文件检测——只判断"内容 byte 级完全一样"，不做近似相似判断。
+
+`find_duplicates()` 本身还是纯只读扫描 + 报告，不碰任何文件。这个模块
+另外提供两个给"清理"场景用的小工具：`pick_keeper()`（从一组重复文件里
+选出默认建议保留哪一份，纯计算，不碰文件系统）和 `move_to_trash()`
+（真正会改动文件系统的唯一入口，移入系统废纸篓、可撤销，不是永久删除）。
+真正的交互式清理流程（逐组确认、写操作日志）在 main.py 的
+`run_duplicates_clean()` 里，这里只放"选谁""怎么删"这两个可以独立测试
+的判断/动作，不掺业务流程。
 
 跟 index/tag 这条链路完全独立：不读写数据库，每次调用都是一次全新扫描，
 不做增量、不做持久化——这是刻意的最小切片，先把"从零到一"跑通，增量/
@@ -95,3 +102,47 @@ def find_duplicates(target_dir):
 
     groups.sort(key=lambda g: g[3], reverse=True)
     return groups
+
+
+def pick_keeper(paths):
+    """从一组重复文件里，选出一份默认建议保留的，其余是默认建议删除的。
+
+    规则：修改时间(mtime)最早的那份——同样内容，越早出现的越接近"原始
+    文件"，后面的更像是复制/搬运出来的副本。mtime 相同时（比如同一次
+    操作批量拷贝出来的），再比路径长度，选最短的（启发式：路径越短，
+    往往越接近"主目录"，嵌套很深的路径更像是归档/备份出来的副本）。
+
+    这只是一个默认建议，不是强制结论——调用方会把分组里每个文件的路径
+    和 mtime 完整展示给用户，用户可以在这个默认选择之上手动改选保留哪份。
+
+    返回 (保留路径, 建议删除的路径列表)。
+    """
+
+    def sort_key(path):
+        try:
+            mtime = Path(path).stat().st_mtime
+        except (FileNotFoundError, PermissionError):
+            # 读不到 mtime 的文件（比如扫描之后被删了）不该被选成"保留项"，
+            # 排到最后面去。
+            mtime = float("inf")
+        # scan.iter_files() 产出的是 Path 对象，不是字符串，len() 直接作用
+        # 在 Path 上会报错（Path 没有 __len__），要转成字符串再比长度。
+        return (mtime, len(str(path)))
+
+    # min() 对每个 path 都调一次 sort_key()，比较得到的 (mtime, 路径长度)
+    # 二元组——tuple 比较是逐位比较，先比 mtime，相同再比长度——返回"最小"
+    # 的那个 key 所对应的原始 path（不是返回 key 本身）。
+    keeper = min(paths, key=sort_key)
+    to_delete = [p for p in paths if p != keeper]
+    return keeper, to_delete
+
+
+def move_to_trash(path):
+    """把一个文件移入系统废纸篓——可以从废纸篓手动还原，不是永久删除。
+
+    这是这个模块里唯一一个真正会改动文件系统的函数，独立出来方便单独
+    测试/替换，不要在别的地方直接调 os.remove() 之类的永久删除操作。
+    """
+    from send2trash import send2trash
+
+    send2trash(str(path))
