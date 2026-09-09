@@ -314,6 +314,39 @@ class DocumentIndex:
             )
             return cursor.rowcount
 
+    def list_present_paths(self, target_dir=None):
+        """列出数据库里当前仍然存在的文档路径（is_present=1）——给
+        duplicates.py 的"数据库驱动查重"模式用：候选文件从"重新扫一遍
+        文件系统"换成"数据库里已经登记过的文件"，这样可以顺带查出
+        跨目录/跨盘的重复（同一份内容既在 A 目录又在 B 目录，各自都建过
+        索引），这是每次独立扫描单个目录的模式做不到的。
+
+        target_dir=None：返回全库范围（跨所有已索引的目录/盘）。
+        传了 target_dir：只限定这棵子树下的文件，前缀匹配逻辑、转义规则
+        跟 mark_missing_as_absent() 完全一样（真实文件夹名常带 % 或 _，
+        SQL LIKE 里是通配符，不转义会误匹配）。
+
+        返回一个字符串路径列表，不是 Path 对象——跟 scan.iter_files()
+        的产出类型不一样，调用方（duplicates.py）要注意这个差异。
+        """
+        if target_dir is None:
+            rows = self.connection.execute(
+                "SELECT path FROM documents WHERE is_present = 1"
+            ).fetchall()
+            return [row[0] for row in rows]
+
+        prefix = str(target_dir).rstrip("/")
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        rows = self.connection.execute(
+            """
+            SELECT path FROM documents
+            WHERE is_present = 1
+              AND (path = ? OR path LIKE ? ESCAPE '\\')
+            """,
+            (prefix, escaped + "/%"),
+        ).fetchall()
+        return [row[0] for row in rows]
+
     def save_project_extraction(self, document_id, full_text):
         """保存一个"项目"单位（代码仓库根目录）的自描述内容（README/package.json 摘要拼接）。
 

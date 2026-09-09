@@ -274,54 +274,77 @@ def _format_bytes(n):
     return f"{size:.1f}TB"
 
 
-def _report_tag_for_dir(target_dir):
-    """把目录路径变成一段能安全嵌进文件名的标识，用来区分"扫描不同目录
-    产生的报告"——原来 duplicates_report.md 这类文件名是写死的，扫完
-    ~/Downloads 再扫 ~/Documents，第二次会把第一次的报告覆盖掉，这是真实
-    bug，不是"就该覆盖"的预期行为（预期行为是"同一个目录重复跑，新报告
-    覆盖旧报告"，不同目录不该互相覆盖）。
+def _report_tag(target_dir, db_path):
+    """把这次 duplicates 扫的是什么，变成一段能安全嵌进文件名的标识，用来
+    区分不同扫描各自的报告——原来 duplicates_report.md 这类文件名是写死
+    的，扫完 ~/Downloads 再扫 ~/Documents，第二次会把第一次的报告覆盖掉，
+    这是真实 bug，不是"就该覆盖"的预期行为（预期行为是"同一个来源重复
+    跑，新报告覆盖旧报告"，不同来源不该互相覆盖）。
 
-    只用目录名（比如"Downloads"）当前缀不够——两个不同路径下都可能有一个
-    叫"Downloads"的文件夹，会撞车。所以在人类可读的目录名后面缀一段基于
-    完整解析路径算出来的短哈希，既保留可读性，又能保证不同目录不会撞到
-    同一个文件名。
+    传了 target_dir：按目录区分。只用目录名（比如"Downloads"）当前缀不
+    够——两个不同路径下都可能有一个叫"Downloads"的文件夹，会撞车。所以在
+    人类可读的目录名后面缀一段基于完整解析路径算出来的短哈希，既保留
+    可读性，又能保证不同目录不会撞到同一个文件名。
+
+    没传 target_dir（数据库全量模式，见 find_duplicates_from_index()）：
+    同样的"可读前缀 + 路径哈希"套路，只是换成基于数据库路径区分，因为
+    这次的候选集不是某一个目录，是"这个数据库里登记过的全部文件"。
     """
     import hashlib
 
-    resolved = Path(target_dir).expanduser().resolve()
-    readable = resolved.name or "root"  # 根目录（比如"/"）本身没有 name，兜底一个字符串
-    digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:8]
-    return f"{readable}_{digest}"
+    if target_dir is not None:
+        resolved = Path(target_dir).expanduser().resolve()
+        readable = resolved.name or "root"  # 根目录（比如"/"）本身没有 name，兜底一个字符串
+        digest = hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:8]
+        return f"{readable}_{digest}"
+
+    resolved_db = Path(db_path).expanduser().resolve()
+    digest = hashlib.sha256(str(resolved_db).encode("utf-8")).hexdigest()[:8]
+    return f"全库_{digest}"
 
 
-def run_duplicates(target_dir):
-    """扫描一个目录，找出内容完全相同（byte 级）的重复文件，生成报告。
+def run_duplicates(target_dir, db_path):
+    """找出内容完全相同（byte 级）的重复文件，生成报告。
 
-    只读——不删除、不移动任何文件，也不碰数据库；每次都是一次独立的全新
-    扫描，不做增量、不跟 index/tag 共享任何状态。判断依据只看文件内容的
-    SHA256 哈希，不看文件名/大小，详见 duplicates.py 里 find_duplicates()
-    的说明。
+    只读——不删除、不移动任何文件。两种候选来源：
+    - 传了 target_dir：重新扫一遍这个目录（不碰数据库，不需要先跑过
+      index，随时能用），跟原来的行为完全一样。
+    - 不传 target_dir：改用数据库里已经登记过的文件当候选（需要先跑过
+      index），好处是能顺带发现"同一份内容分别存在两个不同目录里，各自
+      都建过索引"这种跨目录重复——单独扫一个目录看不到这种情况。
+
+    两种模式判断"是不是重复"的逻辑完全一样（只看内容 SHA256），差别只在
+    候选文件从哪来，详见 duplicates.py 里 find_duplicates()/
+    find_duplicates_from_index() 的说明。
     """
     import time
-    from steward.duplicates import find_duplicates
+    from steward.duplicates import find_duplicates, find_duplicates_from_index
 
-    print(f"正在扫描 {target_dir} ...")
+    if target_dir is not None:
+        print(f"正在扫描 {target_dir} ...")
+    else:
+        print(f"没有指定目录，改从数据库（{db_path}）里已登记的文件查重复（含跨目录）...")
+
     t0 = time.monotonic()
-    groups = find_duplicates(target_dir)
+    if target_dir is not None:
+        groups = find_duplicates(target_dir)
+    else:
+        groups = find_duplicates_from_index(db_path)
     elapsed = time.monotonic() - t0
 
     if not groups:
-        print(f"没有发现内容完全相同的重复文件。（扫描耗时 {elapsed:.1f} 秒）")
+        print(f"没有发现内容完全相同的重复文件。（耗时 {elapsed:.1f} 秒）")
         return
 
     total_wasted = sum(g[3] for g in groups)
     total_files = sum(len(g[1]) for g in groups)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    report_path = OUTPUT_DIR / f"duplicates_report_{_report_tag_for_dir(target_dir)}.md"
+    report_path = OUTPUT_DIR / f"duplicates_report_{_report_tag(target_dir, db_path)}.md"
 
+    source_desc = target_dir if target_dir is not None else f"数据库全量（{db_path}）"
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write(f"# 重复文件报告（{target_dir}）\n\n")
+        f.write(f"# 重复文件报告（{source_desc}）\n\n")
         f.write(
             f"**总计**: {len(groups)} 组重复，共 {total_files} 个文件，"
             f"可释放空间约 {_format_bytes(total_wasted)}\n\n"
@@ -337,15 +360,19 @@ def run_duplicates(target_dir):
             f.write("\n")
 
     print(f"共发现 {len(groups)} 组重复，{total_files} 个文件，可释放空间约 {_format_bytes(total_wasted)}")
-    print(f"扫描耗时: {elapsed:.1f} 秒")
+    print(f"耗时: {elapsed:.1f} 秒")
     print(f"✅ 报告已生成: {report_path}")
 
 
-def run_duplicates_clean(target_dir):
+def run_duplicates_clean(target_dir, db_path):
     """交互式清理重复文件——逐组确认后，把除保留项外的文件移入系统废纸篓
     （可撤销，不是永久删除）。
 
-    关键行为，跟只读版本的 run_duplicates() 不一样：
+    候选来源跟只读版本的 run_duplicates() 是同一套规则：传了 target_dir
+    就重新扫这个目录；不传就从数据库（db_path）里已登记的文件查，能顺带
+    清理跨目录的重复。
+
+    关键行为，跟只读版本不一样：
     - 会真的改动文件系统（移入废纸篓），所以每一组都要求用户明确确认，
       不接受任何"默认全部执行"的快捷方式——delete 是这个项目第一个真正
       的"行动层"能力，宁可啰嗦也不要图快。
@@ -360,15 +387,21 @@ def run_duplicates_clean(target_dir):
       (send2trash 在这台机器上实测调用的是 CoreServices 的
       FSMoveObjectToTrashSync，就是 Finder"移到废纸篓"用的同一套系统
       API，"放回原处"能力是系统原生就有的)，这里不重复实现。
-    - 依然不碰数据库、不碰任何不在重复分组里的文件。
+    - 不碰任何不在重复分组里的文件；数据库全量模式下会读数据库拿候选
+      文件列表，但从头到尾不会往数据库里写任何东西——删除文件这个动作
+      跟数据库状态没有关联，DB 里的记录不会因为这次清理被更新。
     """
     import json
     from datetime import datetime
 
-    from steward.duplicates import find_duplicates, move_to_trash, pick_keeper
+    from steward.duplicates import find_duplicates, find_duplicates_from_index, move_to_trash, pick_keeper
 
-    print(f"正在扫描 {target_dir} ...")
-    groups = find_duplicates(target_dir)
+    if target_dir is not None:
+        print(f"正在扫描 {target_dir} ...")
+        groups = find_duplicates(target_dir)
+    else:
+        print(f"没有指定目录，改从数据库（{db_path}）里已登记的文件查重复（含跨目录）...")
+        groups = find_duplicates_from_index(db_path)
 
     if not groups:
         print("没有发现内容完全相同的重复文件，没有可清理的。")
@@ -376,9 +409,9 @@ def run_duplicates_clean(target_dir):
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     # 这个日志是追加写（"a" 模式），不是覆盖写，所以严格说不会丢数据——但
-    # 不同目录的清理记录混在同一个文件里，不方便按目录回看，跟报告文件一样
-    # 按目录区分开，保持两者行为一致、可预期。
-    log_path = OUTPUT_DIR / f"duplicates_cleanup_log_{_report_tag_for_dir(target_dir)}.jsonl"
+    # 不同来源的清理记录混在同一个文件里，不方便按来源回看，跟报告文件
+    # 一样按来源区分开，保持两者行为一致、可预期。
+    log_path = OUTPUT_DIR / f"duplicates_cleanup_log_{_report_tag(target_dir, db_path)}.jsonl"
 
     total_deleted = 0
     total_freed = 0
@@ -540,9 +573,24 @@ def main():
 
     duplicates_parser = subparsers.add_parser(
         "duplicates",
-        help="扫描目录，找出内容完全相同的重复文件（默认只读；加 --clean 交互式清理）",
+        help="找出内容完全相同的重复文件（默认只读；加 --clean 交互式清理）",
+        description=(
+            "两种候选来源，二选一，不能同时用：\n"
+            "  1) 传 target_dir —— 重新扫这个目录，不碰数据库、不需要先跑过\n"
+            "     index，--db 在这个模式下会被忽略，传了也没用。\n"
+            "  2) 不传 target_dir —— 改从 --db 指向的数据库里已建过索引的\n"
+            "     文件查重复，能顺带发现跨目录的重复（前提是那些目录之前\n"
+            "     跑过 index）；--db 不传就用默认的共享数据库，通常不用管。"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        parents=[db_parent],
     )
-    duplicates_parser.add_argument("target_dir", help="要扫描的目录，例如 ~/Downloads")
+    duplicates_parser.add_argument(
+        "target_dir",
+        nargs="?",
+        default=None,
+        help="要扫描的目录，例如 ~/Downloads。不传则改走数据库模式，见上面的说明。",
+    )
     duplicates_parser.add_argument(
         "--clean",
         action="store_true",
@@ -568,9 +616,9 @@ def main():
         run_tags(args.db, tag_query=args.tag)
     elif args.command == "duplicates":
         if args.clean:
-            run_duplicates_clean(args.target_dir)
+            run_duplicates_clean(args.target_dir, args.db)
         else:
-            run_duplicates(args.target_dir)
+            run_duplicates(args.target_dir, args.db)
     else:
         parser.print_help()
 

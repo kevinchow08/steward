@@ -41,12 +41,16 @@ def _hash_file(path):
     return hasher.hexdigest()
 
 
-def find_duplicates(target_dir):
-    """扫描 target_dir，返回内容完全相同的文件分组。
+def _group_by_content(candidate_paths):
+    """核心分组算法：给一批候选路径，返回内容完全相同的文件分组。
+
+    不关心这批路径是怎么来的（扫文件系统 or 查数据库）——find_duplicates()
+    和 find_duplicates_from_index() 都是"拿到一批候选路径"之后调这个函数，
+    这段"怎么判断重复"的逻辑只写一份，不重复。
 
     两阶段过滤，只有真正需要才去读文件内容：
     1. 先按文件大小分组（stat() 现成的信息，不用读文件内容）——大小在
-       全目录里独一无二的文件，不可能跟别的文件内容相同，直接排除，不用
+       候选集里独一无二的文件，不可能跟别的文件内容相同，直接排除，不用
        浪费时间去读它的字节算哈希。
     2. 只对"大小有重复"的那一批文件真正计算哈希，再按哈希分组，分组里
        文件数 > 1 的才是真正的重复。
@@ -55,28 +59,17 @@ def find_duplicates(target_dir):
     见过好几个文件夹各自都有一份叫"餐饮1.pdf"的发票，但金额、日期完全
     不同，同名不代表内容一样，这个坑必须靠只认内容哈希来避开）。
 
-    跟 index 命令一样复用 scan.find_project_roots()/scan.iter_files()
-    跳过代码项目内部——一个 node_modules 目录里几千个文件互相之间大量
-    雷同是正常现象，不是这次要抓的"用户自己的重复文件"，硬扫进来只会让
-    报告充满噪声。
-
-    返回一个列表，每个元素是 (sha256, [文件路径列表])，按这组文件加起来
-    浪费的空间从大到小排序。
+    返回一个列表，每个元素是 (sha256, [文件路径列表], 单份大小, 浪费字节数)，
+    按这组文件加起来浪费的空间从大到小排序。
     """
-    target_path = Path(target_dir).expanduser().resolve()
-    if not target_path.exists():
-        raise FileNotFoundError(f"目标目录不存在或当前不可达: {target_path}")
-
-    project_roots = scan.find_project_roots(target_path)
-
     # 第一阶段：按大小分组
     by_size = defaultdict(list)
-    for file_path in scan.iter_files(target_path, skip_dirs=project_roots):
+    for file_path in candidate_paths:
         try:
             size = Path(file_path).stat().st_size
         except (FileNotFoundError, PermissionError):
-            # 扫描到但读不到的文件（权限问题、扫描过程中被删了），跳过，
-            # 不是这个功能要处理的问题。
+            # 候选路径读不到了（权限问题、扫描/建索引之后文件被删了），
+            # 跳过，不是这个功能要处理的问题。
             continue
         by_size[size].append(file_path)
 
@@ -102,6 +95,55 @@ def find_duplicates(target_dir):
 
     groups.sort(key=lambda g: g[3], reverse=True)
     return groups
+
+
+def find_duplicates(target_dir):
+    """扫描 target_dir，返回内容完全相同的文件分组。
+
+    每次都是一次独立的全新文件系统扫描，不碰数据库、不需要先跑过
+    index——随时能用，代价是每次只能看到这一个目录，看不到"同一份内容
+    还存在别的、这次没扫到的目录里"这种跨目录重复。要覆盖这种情况，用
+    下面的 find_duplicates_from_index()。
+
+    跟 index 命令一样复用 scan.find_project_roots()/scan.iter_files()
+    跳过代码项目内部——一个 node_modules 目录里几千个文件互相之间大量
+    雷同是正常现象，不是这次要抓的"用户自己的重复文件"，硬扫进来只会让
+    报告充满噪声。
+    """
+    target_path = Path(target_dir).expanduser().resolve()
+    if not target_path.exists():
+        raise FileNotFoundError(f"目标目录不存在或当前不可达: {target_path}")
+
+    project_roots = scan.find_project_roots(target_path)
+    candidate_paths = scan.iter_files(target_path, skip_dirs=project_roots)
+    return _group_by_content(candidate_paths)
+
+
+def find_duplicates_from_index(db_path, target_dir=None):
+    """不重新扫文件系统，改用数据库里已经登记过的文件当候选集，找重复。
+
+    候选来源是 document_index.DocumentIndex.list_present_paths()——只看
+    is_present=1 的文件（已经被标记为消失/改名的旧记录不参与），数据库
+    本身是可以跨目录、跨盘共享的（见 index_runs.target_dir、
+    documents.volume_label），所以这个模式天然能发现"同一份内容分别存在
+    两个不同的、各自都建过索引的目录里"这种 find_duplicates() 单目录扫描
+    发现不了的跨目录重复。
+
+    target_dir=None：候选集是数据库里全部已索引、当前仍存在的文件（真正
+    的"跨全库查重"）。传了 target_dir：候选集限定在这棵子树下，行为更
+    接近 find_duplicates()，但省一次重新扫描文件系统的开销，且能排除
+    已经消失的旧记录。
+
+    这个模式的局限：只能看到"已经跑过 index 的文件"——没建过索引的目录，
+    这个模式看不到，需要用 find_duplicates() 直接扫。两个模式互补，不是
+    互相替代。
+    """
+    from steward.document_index import DocumentIndex
+
+    with DocumentIndex(db_path=db_path) as index:
+        candidate_paths = index.list_present_paths(target_dir=target_dir)
+
+    return _group_by_content(candidate_paths)
 
 
 def pick_keeper(paths):
