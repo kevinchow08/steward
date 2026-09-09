@@ -143,27 +143,6 @@ def search_documents(
     reranked = [r for r in reranked_all if r.score >= _MIN_RERANK_SCORE]
     results = reranked[:top_k]
 
-    # 诊断信号，不参与任何判断逻辑——第一名和第二名的分差（gap）。
-    #
-    # 本来是想验证"检索增强生成领域常提的 gap 信号（比如 TARG 那类工作）能不能
-    # 替代/补充 _MIN_RERANK_SCORE 这种固定阈值"，用 tests/run_search_regression.py
-    # 跑过 13 个真实案例后，**已经拿到明确的反证，这条路径不可行**：
-    # `宠物疫苗接种记录`（该判定不相关的假阳性）gap 反而很大（1.674，因为
-    # 它虽然分数低，但比全库倒数第二名还是拉开了距离）；`日本签证`/`财务凭证`
-    # （真正该判定相关、只是好答案不止一个）gap 反而接近 0。gap 离不开"绝对
-    # 分数本身够不够高"这个前提，脱离绝对分数单独用会把结论判反，不是"数据还
-    # 不够多"，是这个信号本身在我们的真实数据上不具备独立判别力。
-    #
-    # 继续保留这两个字段是因为它们现在确实在被用——tests/run_search_regression.py
-    # 每次跑回归集都会打印，是留存下来的真实观测数据，不是猜想着"以后可能用得上"
-    # 的死代码；只是不要再假设未来会拿它当正式判断依据，除非出现新的、有说服力
-    # 的证据。
-    top1_top2_gap = None
-    if len(reranked_all) >= 2:
-        top1_top2_gap = reranked_all[0].score - reranked_all[1].score
-    elif len(reranked_all) == 1:
-        top1_top2_gap = float("inf")  # 只有一个候选，没有"第二名"可比，视为无穷大的分差
-
     stats = {
         "query_embed_seconds": query_embed_seconds,
         "rerank_seconds": rerank_seconds,
@@ -173,7 +152,6 @@ def search_documents(
         "tag_search_seconds": tag_seconds,
         "chunk_count": chunk_count,
         "top1_score": reranked_all[0].score if reranked_all else None,
-        "top1_top2_gap": top1_top2_gap,
         "document_count": len(reranked),
         "dense_hit_count": len(dense_ranking),
         "sparse_hit_count": len(sparse_ranking),

@@ -77,9 +77,6 @@ def main():
 
         passed, detail = check_case(case, results)
 
-        gap = stats["top1_top2_gap"]
-        gap_str = "inf" if gap == float("inf") else (f"{gap:.3f}" if gap is not None else "N/A")
-
         if passed is None:
             icon = "📝"
             noted_count += 1
@@ -92,7 +89,7 @@ def main():
 
         print(f"{icon} {query!r}")
         print(f"    {detail}")
-        print(f"    top1 分数={stats['top1_score']} | top1-top2 分差={gap_str} | 通过重排序={stats['document_count']} 个")
+        print(f"    top1 分数={stats['top1_score']} | 通过重排序={stats['document_count']} 个")
         print()
 
     total_judged = passed_count + failed_count
