@@ -12,3 +12,4 @@ openpyxl
 xlrd
 olefile
 send2trash
+modelscope

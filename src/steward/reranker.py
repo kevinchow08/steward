@@ -26,20 +26,27 @@ chunk）逐一打分——测过：全部打一遍在这台机器上要 15~38 �
 这一小批候选做精细判断，成本才付得起。
 """
 
-from steward.paths import MODELS_DIR
+from pathlib import Path
+
+from steward.paths import MODELS_DIR, ensure_model_downloaded
 
 
-# 模型权重放在统一的用户级目录下（见 steward/paths.py），不打进 pip 包。
+# 模型权重放在统一的用户级目录下（见 steward/paths.py），不打进 pip 包——
+# 首次运行本地没有时从 ModelScope 自动下载。
 DEFAULT_MODEL_PATH = MODELS_DIR / "bge-reranker-v2-m3"
+MODELSCOPE_ID = "BAAI/bge-reranker-v2-m3"
 
 
 class LocalReranker:
     """使用 FlagEmbedding 在本机对 (query, 候选文本) 打相关性分数。"""
 
-    def __init__(self, model_path=DEFAULT_MODEL_PATH, use_fp16=True):
+    def __init__(self, model_path=DEFAULT_MODEL_PATH, use_fp16=True, modelscope_id=MODELSCOPE_ID):
         # 延迟导入：只有真正创建 LocalReranker 时才加载这个几百 MB 的模型库
         # 和权重，跟 LocalEmbedder 的做法一致。
         from FlagEmbedding import FlagReranker
+
+        model_path = Path(model_path).expanduser()
+        ensure_model_downloaded(model_path, modelscope_id)
 
         self._reranker = FlagReranker(str(model_path), use_fp16=use_fp16)
 

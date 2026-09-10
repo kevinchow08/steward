@@ -19,3 +19,32 @@ APP_DATA_DIR = Path.home() / "Library" / "Application Support" / "Steward"
 DEFAULT_DB_PATH = APP_DATA_DIR / "steward.db"
 MODELS_DIR = APP_DATA_DIR / "models"
 OUTPUT_DIR = APP_DATA_DIR / "output"
+
+
+def ensure_model_downloaded(local_dir, modelscope_id):
+    """确保 local_dir 下有一份可加载的模型；没有就从 ModelScope 下载。
+
+    为什么用 ModelScope 不用 HuggingFace：这个项目主要在国内网络环境下用，
+    直连 HF Hub 经常慢/连不上；ModelScope（魔搭，阿里的模型社区）上
+    bge-m3 / bge-reranker-v2-m3 都有官方镜像，国内下载快。
+
+    "有没有"的判断标准是 local_dir 下有没有 config.json（模型目录的标志
+    文件），不是"目录是不是非空"——避免一个下了一半、内容不完整的目录被
+    当成"已经有了"。
+
+    下载进度：snapshot_download 自带 tqdm 进度条，直接打在终端上，这里不用
+    另外处理。下载是一次性的，下完缓存在 local_dir，之后不再下。
+    """
+    local_dir = Path(local_dir)
+    if (local_dir / "config.json").exists():
+        return
+
+    print(
+        f"本地没有 {local_dir.name} 模型，从 ModelScope 下载（一次性，"
+        f"几个 GB，下完缓存在本地不再重复下）...",
+        flush=True,
+    )
+    local_dir.mkdir(parents=True, exist_ok=True)
+    from modelscope import snapshot_download
+
+    snapshot_download(modelscope_id, local_dir=str(local_dir))

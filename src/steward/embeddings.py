@@ -8,13 +8,15 @@ from pathlib import Path
 
 import numpy as np
 
-from steward.paths import MODELS_DIR
+from steward.paths import MODELS_DIR, ensure_model_downloaded
 
 
 DEFAULT_MODEL_NAME = "BAAI/bge-m3"
 # 模型权重放在统一的用户级目录下（见 steward/paths.py），不打进 pip 包——
-# 体积几个 GB，独立分发、放进这里，代码去这个约定位置找。
-DEFAULT_MODEL_CACHE = MODELS_DIR / "bge-m3"
+# 体积几个 GB，独立分发/首次运行自动下载，代码去这个约定位置找。
+DEFAULT_MODEL_DIR = MODELS_DIR / "bge-m3"
+# ModelScope 上的仓库 ID，本地没有模型时从这里下。
+MODELSCOPE_ID = "BAAI/bge-m3"
 
 
 @dataclass
@@ -34,25 +36,24 @@ class LocalEmbedder:
         model_name=DEFAULT_MODEL_NAME,
         device=None,
         normalize_embeddings=True,
-        cache_folder=DEFAULT_MODEL_CACHE,
+        model_dir=DEFAULT_MODEL_DIR,
+        modelscope_id=MODELSCOPE_ID,
     ):
         # 延迟导入：只有真正创建 LocalEmbedder 时才加载较重的模型库。
         from sentence_transformers import SentenceTransformer
 
+        model_dir = Path(model_dir).expanduser()
+        # 本地没有就从 ModelScope 下载（一次性，带进度条），下完缓存在 model_dir。
+        ensure_model_downloaded(model_dir, modelscope_id)
+
         model_kwargs = {}
         if device is not None:
             model_kwargs["device"] = device
-        if cache_folder is not None:
-            cache_folder = Path(cache_folder).expanduser()
-            cache_folder.mkdir(parents=True, exist_ok=True)
-            model_kwargs["cache_folder"] = str(cache_folder)
 
-        # 优先使用本地已下载的缓存模型，避免重复联网检查以及 HF Hub 的未认证 Warning
-        try:
-            self._model = SentenceTransformer(model_name, local_files_only=True, **model_kwargs)
-        except Exception:
-            # 本地缓存不存在时，降级回在线下载模式
-            self._model = SentenceTransformer(model_name, **model_kwargs)
+        # 直接从本地目录加载——model_dir 是一个平铺的模型文件目录
+        # （config.json / pytorch_model.bin / tokenizer 等直接在里面），
+        # 不是 HF hub 的缓存布局。ensure_model_downloaded 保证了它存在。
+        self._model = SentenceTransformer(str(model_dir), **model_kwargs)
 
         self._model_name = model_name
         self._normalize_embeddings = normalize_embeddings
