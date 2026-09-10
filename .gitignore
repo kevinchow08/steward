@@ -1,8 +1,14 @@
-models/
+# 模型权重、数据库、输出报告现在都放在 ~/Library/Application Support/Steward/ 下
+# （见 src/steward/paths.py），不在仓库里。留着 output/ 和 *.db 这两条是防止
+# 开发时误建在仓库根目录的旧位置被提交进去。
 output/
+*.db
+
 .venv/
+build/
+dist/
+*.egg-info/
 __pycache__/
 *.py[cod]
 .DS_Store
 *.DS_Store
-*.db

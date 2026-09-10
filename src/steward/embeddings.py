@@ -8,10 +8,13 @@ from pathlib import Path
 
 import numpy as np
 
+from steward.paths import MODELS_DIR
+
 
 DEFAULT_MODEL_NAME = "BAAI/bge-m3"
-# embeddings.py 位于 src/steward/ 下，向上两层就是项目根目录。
-DEFAULT_MODEL_CACHE = Path(__file__).resolve().parents[2] / "models" / "bge-m3"
+# 模型权重放在统一的用户级目录下（见 steward/paths.py），不打进 pip 包——
+# 体积几个 GB，独立分发、放进这里，代码去这个约定位置找。
+DEFAULT_MODEL_CACHE = MODELS_DIR / "bge-m3"
 
 
 @dataclass

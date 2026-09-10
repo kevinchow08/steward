@@ -1,0 +1,48 @@
+# Python 项目的"身份证 + 说明书"——pip 读这个文件来决定怎么装 steward：
+# 装哪些代码、连带装哪些第三方依赖、装完生成哪个命令。
+# 以前的标准是 setup.py，现在统一用 pyproject.toml。
+
+[build-system]
+# 用 setuptools 作为构建后端（把源码打成 wheel 的工具）。
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "steward"
+version = "0.1.0"
+description = "端侧文件语义索引 / 打标签 / 搜索 / 去重工具"
+requires-python = ">=3.11"
+
+# 依赖——pip 装 steward 时会自动把这些也一起装上，不用用户自己去读
+# requirements.txt。跟 requirements.txt 保持同步（那份留着给开发环境
+# `pip install -r` 用）。
+dependencies = [
+    "pyyaml",
+    "psutil",
+    "pymupdf",
+    "python-docx",
+    "beautifulsoup4",
+    "numpy",
+    "sentence-transformers",
+    "FlagEmbedding",
+    "openai",
+    "httpx",
+    "openpyxl",
+    "xlrd",
+    "olefile",
+    "send2trash",
+]
+
+[project.scripts]
+# 装完之后系统 PATH 里会多一个 `steward` 命令，指向 steward/cli.py 的 main()。
+# 用户直接敲 `steward search "..."`，不用 `python 某路径/main.py`。
+steward = "steward.cli:main"
+
+[tool.setuptools.packages.find]
+# 包代码在 src/ 下（src-layout），告诉打包工具去那里找。
+where = ["src"]
+
+[tool.setuptools.package-data]
+# rules.yaml 不是 .py 文件，默认不会被打进 wheel，这里显式声明要带上它。
+# 代码里通过 importlib.resources 读，不管装到哪都找得到。
+steward = ["config/*.yaml"]

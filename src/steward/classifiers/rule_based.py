@@ -1,5 +1,6 @@
 """Week 1:纯规则分类器——扩展名 + magic bytes,不涉及任何模型。"""
 
+import importlib.resources
 from pathlib import Path
 
 import yaml
@@ -9,7 +10,25 @@ import yaml
 HEADER_READ_BYTES = 16
 
 
+def load_default_rules():
+    """读打进包里的 config/rules.yaml。
+
+    用 importlib.resources 定位，不是 `Path(__file__).parents[N] / "config"`
+    这种相对路径拼接——后者假设"自己正在源码仓库里跑"，pip 装到 site-packages
+    下就失效。importlib.resources 是标准库里专门用来读"包内附带的数据文件"的
+    工具，不管这个包被装到哪都能正确定位。
+    """
+    text = (
+        importlib.resources.files("steward")
+        .joinpath("config", "rules.yaml")
+        .read_text(encoding="utf-8")
+    )
+    return yaml.safe_load(text)
+
+
 def load_rules(rules_path):
+    """从一个明确的文件路径读规则——留给"用户自己提供一份 rules 文件"这类
+    场景用。管线默认走 load_default_rules()（读打进包里的那份）。"""
     # yaml.safe_load 把 yaml 文件解析成 Python 的嵌套 dict/list 结构
     # 结构跟 rules.yaml 里写的一样:{"document": {"extensions": [...], "magic_bytes": [...]}, ...}
     with open(rules_path, encoding="utf-8") as f:

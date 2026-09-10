@@ -17,9 +17,6 @@ from steward.extractors import (
 from steward.monitor import ResourceMonitor
 
 
-BASE_DIR = Path(__file__).resolve().parents[2]
-RULES_PATH = BASE_DIR / "config" / "rules.yaml"
-
 # extractors.py 里表格类提取器实际会用到的名字（.py/xlsx/xls）——用来判断
 # 一次提取出来的文本要不要走 chunk_tabular_text()（每个 chunk 带表头）而不是
 # 走 chunk_text()（普通文章式切分，表格数据切到中间会脱离列名上下文，见
@@ -96,7 +93,7 @@ def build_index(target_dir, embedder, db_path=DEFAULT_DB_PATH, force=False):
             f"目标目录不存在或当前不可达（如果是外置盘，检查一下是不是没连接）: {target_path}"
         )
 
-    rules = rule_based.load_rules(RULES_PATH)
+    rules = rule_based.load_default_rules()
     monitor = ResourceMonitor()
     started_at = time.monotonic()
     stats = {

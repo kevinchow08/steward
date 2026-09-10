@@ -11,14 +11,10 @@ from pathlib import Path
 
 import numpy as np
 
-
-# 之前这里指向项目源码目录本身（.../steward/steward.db），是开发阶段图方便的写法，
-# 真要打包分发给用户就不对了——要么落在安装包内部（可能没有写权限，或者升级/卸载时
-# 被清空），不是一个适合"持续积累、跨目录/跨盘共享"的用户数据存储位置。改成 macOS
-# 标准的用户级应用数据目录，这样不管这次 index 的是 ~/Documents 还是某个外置盘，
-# 只要不手动传 --db，天然都会写进同一个共享数据库，不需要用户自己记着保持一致。
-# 这是 macOS 专属路径约定，以后要上 Windows/Linux 得换成对应平台的标准位置。
-DEFAULT_DB_PATH = Path.home() / "Library" / "Application Support" / "Steward" / "steward.db"
+# DEFAULT_DB_PATH 现在统一在 steward.paths 里定义（跟模型目录、输出目录放一起，
+# 都是"跟安装位置无关的绝对路径"）。这里重新导出一次，保持
+# `from steward.document_index import DEFAULT_DB_PATH` 这个老的导入方式不失效。
+from steward.paths import DEFAULT_DB_PATH  # noqa: F401
 
 
 def _utc_now():

@@ -1,24 +1,19 @@
-"""入口:子命令形式（index / search / tag / tags / duplicates），串联
+"""CLI 入口:子命令形式（index / search / tag / tags / duplicates），串联
 scan -> index -> tag -> search/duplicates 这条链路。
+
+这个模块现在住在包内部（src/steward/cli.py），不是仓库根目录的 main.py——
+所以不需要 sys.path 技巧就能 import steward.*，pip 装到哪都能正常跑。
+pyproject.toml 里的入口点 `steward = "steward.cli:main"` 指向下面的 main()。
+仓库根目录还留了一个很薄的 main.py，只是为了开发时 `python main.py ...`
+还能直接用，真正的逻辑全在这里。
 """
 
 import argparse
-import sys
+import os
 from pathlib import Path
 
-# main.py 在仓库根目录,包代码在 src/steward 下(src 布局)
-# Python 默认不会自动把 src/ 加进模块搜索路径,得手动加,不然下面 import steward 会报 ModuleNotFoundError
-# __file__ 是当前文件(main.py)自己的路径,.resolve() 转成绝对路径,.parent 拿到它所在的目录(仓库根目录)
-BASE_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(BASE_DIR / "src"))
-
-OUTPUT_DIR = BASE_DIR / "output"
-
-# 之前这里自己又定义了一份 DEFAULT_DB_PATH（指向项目源码目录），跟
-# document_index.py 里的那份是两份独立的常量、值还不一样——改 document_index.py
-# 那边的默认路径完全不会影响这里，是真实的 bug，不是"两处保持一致就行"的
-# 重复定义。改成直接从 document_index 引用同一个常量，只有一个真正的来源。
-from steward.document_index import DEFAULT_DB_PATH  # noqa: E402
+from steward.document_index import DEFAULT_DB_PATH
+from steward.paths import OUTPUT_DIR
 
 
 def run_index(target_dir, db_path, force=False):
@@ -141,7 +136,7 @@ def run_search(query, db_path, top_k, candidate_pool_size):
     print(f"搜索总耗时:   {total_seconds:.3f} 秒")
 
 
-def run_tag(db_path, max_workers=8, force=False):
+def run_tag(db_path, max_workers=8, force=False, llm_base_url=None):
     """为已有索引文本的文档批量执行打标签（开放式 reasoning + tags，不维护分类体系），并持久化。
 
     这个函数以前还接受 structural_base_url/structural_model 两个参数，是给 V3
@@ -154,6 +149,11 @@ def run_tag(db_path, max_workers=8, force=False):
     run_tagging_pipeline 的说明）。改了 prompt/snippet 长度/模型这类"打标签
     逻辑本身"的改动之后，传 True 强制全部重新打一遍——增量判断只看内容变没变，
     看不出代码变没变，这种情况必须自己记得手动加这个参数。
+
+    llm_base_url：打标签要调用的 llama-server 地址。None（默认）时用
+    run_tagging_pipeline 自己的默认值（本机 127.0.0.1:8080）。分发给别的
+    同事用时，他们机器上没跑 llama-server，要指向一台在跑的机器——通过
+    `--llm-base-url` 参数或 `STEWARD_LLM_BASE_URL` 环境变量传进来。
     """
 
     import time
@@ -161,14 +161,16 @@ def run_tag(db_path, max_workers=8, force=False):
     from steward.tagging import run_tagging_pipeline
 
     print(f"🚀 启动打标签引擎（开放式 reasoning + tags{'，force 模式：全部重新打标签' if force else ''}）...")
+    if llm_base_url:
+        print(f"   打标签调用的 llama-server: {llm_base_url}")
     start_time = time.monotonic()
 
+    pipeline_kwargs = {"max_workers": max_workers, "force": force}
+    if llm_base_url:
+        pipeline_kwargs["llm_base_url"] = llm_base_url
+
     with DocumentIndex(db_path) as index:
-        stats = run_tagging_pipeline(
-            index=index,
-            max_workers=max_workers,
-            force=force,
-        )
+        stats = run_tagging_pipeline(index=index, **pipeline_kwargs)
 
     elapsed = time.monotonic() - start_time
 
@@ -556,6 +558,17 @@ def main():
             "所有文档吃到新逻辑——增量判断只看内容变没变，看不出代码变没变。"
         ),
     )
+    tag_parser.add_argument(
+        "--llm-base-url",
+        default=os.environ.get("STEWARD_LLM_BASE_URL"),
+        help=(
+            "打标签调用的 llama-server 地址（OpenAI 兼容接口），例如 "
+            "http://192.168.1.10:8080/v1。不传则用本机默认 "
+            "http://127.0.0.1:8080/v1。也可以用环境变量 STEWARD_LLM_BASE_URL "
+            "设一次、不用每次敲——分发给别人用时，他们机器上没跑 llama-server，"
+            "必须指向一台在跑的机器。"
+        ),
+    )
 
     tags_parser = subparsers.add_parser(
         "tags", help="展示数据库中已打标签文档的标签、reasoning 及置信度", parents=[db_parent]
@@ -611,6 +624,7 @@ def main():
             args.db,
             max_workers=args.workers,
             force=args.force,
+            llm_base_url=args.llm_base_url,
         )
     elif args.command == "tags":
         run_tags(args.db, tag_query=args.tag)

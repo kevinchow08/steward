@@ -26,11 +26,11 @@ chunk）逐一打分——测过：全部打一遍在这台机器上要 15~38 �
 这一小批候选做精细判断，成本才付得起。
 """
 
-from pathlib import Path
+from steward.paths import MODELS_DIR
 
 
-# reranker.py 位于 src/steward/ 下，向上两层就是项目根目录。
-DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[2] / "models" / "bge-reranker-v2-m3"
+# 模型权重放在统一的用户级目录下（见 steward/paths.py），不打进 pip 包。
+DEFAULT_MODEL_PATH = MODELS_DIR / "bge-reranker-v2-m3"
 
 
 class LocalReranker:
