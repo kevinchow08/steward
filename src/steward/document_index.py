@@ -310,6 +310,20 @@ class DocumentIndex:
             )
             return cursor.rowcount
 
+    def list_target_dirs(self):
+        """返回这个数据库管理过的所有 target_dir（去重、按字符串排序），
+        供 refresh 命令决定要对哪些目录做增量刷新，也供 schedule-setup
+        生成 launchd 的 WatchPaths 监听列表用。
+
+        target_dir 是 build_index() 里 .resolve() 过的绝对路径字符串（见
+        indexing.py），这里直接原样返回，调用方可以直接拿去传给
+        build_index() 用，不需要再处理一遍。
+        """
+        rows = self.connection.execute(
+            "SELECT DISTINCT target_dir FROM index_runs WHERE target_dir IS NOT NULL ORDER BY target_dir"
+        ).fetchall()
+        return [row[0] for row in rows]
+
     def list_present_paths(self, target_dir=None):
         """列出数据库里当前仍然存在的文档路径（is_present=1）——给
         duplicates.py 的"数据库驱动查重"模式用：候选文件从"重新扫一遍

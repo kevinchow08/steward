@@ -20,6 +20,17 @@ DEFAULT_DB_PATH = APP_DATA_DIR / "steward.db"
 MODELS_DIR = APP_DATA_DIR / "models"
 OUTPUT_DIR = APP_DATA_DIR / "output"
 
+# refresh 命令（数据库管理目录的自动增量刷新）用到的几个状态文件，理由见
+# refresh.py 模块开头的说明：
+# - REFRESH_LOCK_PATH：重叠保护用的 PID 锁文件，只在一次 refresh 运行期间存在。
+# - REFRESH_LOG_PATH：每次 refresh 运行结果的追加日志——launchd 触发的任务
+#   没有终端可看，这是唯一能事后查"跑没跑、跑成什么样"的地方。
+# - REFRESH_LAST_RUN_PATH：记录上一次真正开始跑的时间，配合 WatchPaths
+#   触发时的节流判断（避免用户高强度改文件时被连续拉起来跑好几次）。
+REFRESH_LOCK_PATH = APP_DATA_DIR / "refresh.lock"
+REFRESH_LOG_PATH = APP_DATA_DIR / "refresh.log"
+REFRESH_LAST_RUN_PATH = APP_DATA_DIR / "refresh_last_run"
+
 
 def ensure_model_downloaded(local_dir, modelscope_id):
     """确保 local_dir 下有一份可加载的模型；没有就从 ModelScope 下载。

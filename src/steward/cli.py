@@ -266,6 +266,50 @@ def run_tags(db_path, tag_query=None):
     print(f"✅ 报告已生成: {report_path}")
 
 
+def run_refresh(db_path, llm_base_url=None):
+    """跑一次数据库管理目录的增量刷新（对每个目录增量 index，再跑一次全库
+    增量 tag）。设计给 launchd 触发用，也可以手动跑，验证/调试用同一条路径。
+
+    详细逻辑（重叠保护、节流、llama-server 健康检查、失败日志）都在
+    refresh.py 里，这里只负责调用+把结果打印成人能看懂的文字，跟其它
+    run_* 函数的分工一致。
+    """
+    from steward.paths import REFRESH_LOG_PATH
+    from steward.refresh import run_refresh as _run_refresh
+
+    result = _run_refresh(db_path=db_path, llm_base_url=llm_base_url)
+
+    if result.get("skipped"):
+        reason = {"throttled": "节流窗口内已经跑过", "already_running": "上一次还在跑"}[result["skipped"]]
+        print(f"本次跳过（{reason}）。详细日志: {REFRESH_LOG_PATH}")
+        return
+
+    print(f"index 完成 {len(result['processed_dirs'])} 个目录", end="")
+    if result["unreachable_dirs"]:
+        print(f"，{len(result['unreachable_dirs'])} 个目录不可达/出错", end="")
+    print()
+
+    if result["tag_stats"] is not None:
+        stats = result["tag_stats"]
+        print(f"tag 完成：深度打标签 {stats['tagged_count']} 份，内容没变跳过 {stats['skipped_up_to_date_count']} 份")
+    else:
+        print(f"跳过打标签：{result['tag_skipped_reason']}")
+
+    print(f"总耗时: {result['elapsed_seconds']:.1f} 秒")
+    print(f"详细日志: {REFRESH_LOG_PATH}")
+
+
+def run_schedule_setup(db_path):
+    """生成/更新 launchd 的 WatchPaths 监听配置并重新加载。每次新管理了
+    一个此前没 index 过的目录之后，重新跑一次这个命令，让它也被监听到——
+    这是显式的手动步骤，不是 index 命令自动触发的，理由见 refresh.py
+    里 setup_schedule() 的说明。
+    """
+    from steward.refresh import setup_schedule
+
+    setup_schedule(db_path=db_path)
+
+
 def _format_bytes(n):
     """把字节数格式化成人类好读的单位，只用来展示，不参与任何判断逻辑。"""
     size = float(n)
@@ -613,6 +657,23 @@ def main():
         ),
     )
 
+    refresh_parser = subparsers.add_parser(
+        "refresh",
+        help="对数据库管理的所有目录做一次增量刷新（index+tag），设计给 launchd 触发用",
+        parents=[db_parent],
+    )
+    refresh_parser.add_argument(
+        "--llm-base-url",
+        default=os.environ.get("STEWARD_LLM_BASE_URL"),
+        help="打标签调用的 llama-server 地址，含义跟 tag 命令的同名参数完全一致。",
+    )
+
+    subparsers.add_parser(
+        "schedule-setup",
+        help="生成/更新 launchd 监听配置，让 refresh 在数据库管理的目录发生变化时自动触发",
+        parents=[db_parent],
+    )
+
     args = parser.parse_args()
 
     if args.command == "index":
@@ -633,6 +694,10 @@ def main():
             run_duplicates_clean(args.target_dir, args.db)
         else:
             run_duplicates(args.target_dir, args.db)
+    elif args.command == "refresh":
+        run_refresh(args.db, llm_base_url=args.llm_base_url)
+    elif args.command == "schedule-setup":
+        run_schedule_setup(args.db)
     else:
         parser.print_help()
 
