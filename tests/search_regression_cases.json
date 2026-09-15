@@ -100,5 +100,102 @@
     "expect": "match",
     "top_result_should_contain": ["Data_from_Claude_Suspended", "职业", "述职"],
     "note": "2026-09-08 新增，关键案例。18 个结果全部合理相关，但标签检索命中数是 0——整条查询里没有任何文档能靠标签佐证。直接证明'无标签佐证'在这个语料里会大批量出现在真正正确的结果上，不是稀有情况，是评估'标签交叉验证'这个假设是否可行的关键反例。"
+  },
+  {
+    "query": "我应该怎么开始存钱",
+    "expect": "match",
+    "top_result_should_contain": ["工程师的投资建议"],
+    "note": "2026-09-15 新增，口语化提问维度。跟直接查'存钱理财的方法'相比，第一名一致，说明没有 query rewrite 这一步，纯 dense 检索依然扛得住这种简单口语化改写。已知会在候选池边缘混入一条跑步训练记录（因为文中有'我在存钱，后面花'这句跑步比喻，字面重合），但不影响第一名，不做严格拦截。"
+  },
+  {
+    "query": "帮我找一下吃饭报销的发票",
+    "expect": "match",
+    "top_result_should_contain": ["报销相关"],
+    "note": "2026-09-15 新增，口语化提问维度。效果等同直接查'报销发票'，10 个通过重排序，全部真实发票。"
+  },
+  {
+    "query": "去日本旅游要准备什么材料",
+    "expect": "note_only",
+    "note": "2026-09-15 新增。实测第一名是私人旅行装备清单（相机/SIM卡/现金），签证申请材料（申请表/亲属表）排在第 4-8 名——语义上不算错（这些私人笔记确实在讲'要准备什么'），但很可能不是用户真实想要的答案。不做严格判定，是支持'该补 Query Rewrite/意图澄清'这个判断的具体证据，留着供后续参考。"
+  },
+  {
+    "query": "流水线",
+    "expect": "match",
+    "top_result_should_contain": ["docker部署", "Transformer"],
+    "should_not_appear_in_top": ["报销相关", "个人所得税", "住房补贴"],
+    "note": "2026-09-15 新增，歧义词对照组（对照'银行流水'）。验证 reranker 能不能正确识别'流水线'的技术含义（CI/CD、Transformer 分层比喻），不被'流水'的金融含义污染。实测干净，只有 2 个候选通过重排序。"
+  },
+  {
+    "query": "定投",
+    "expect": "match",
+    "top_result_should_contain": ["工程师的投资建议", "芒格警告"],
+    "note": "2026-09-15 新增，投资术语精确检索。已知会在候选池边缘混入一条 PTE 英语材料（阅读理解原文里恰好用到英文单词 invest，字面重合），分数压在末位，不影响第一名。"
+  },
+  {
+    "query": "Nacos",
+    "expect": "match",
+    "top_result_should_contain": ["Nacos"],
+    "note": "2026-09-15 新增，专有名词精确检索。"
+  },
+  {
+    "query": "半马配速",
+    "expect": "match",
+    "top_result_should_contain": ["LT2", "半马", "12.28"],
+    "note": "2026-09-15 新增，专有名词精确检索，验证跑步类内容不会被财经类对话（同样存放在对话List下）污染。实测非常干净，8 个结果全部跑步训练相关，重排序分数最高到 5.5。"
+  },
+  {
+    "query": "microservices",
+    "expect": "match",
+    "top_result_should_contain": ["Nest 通关秘籍"],
+    "note": "2026-09-15 新增，跨语言查询。结果跟中文查询'微服务'高度重合，验证 bge-m3 的多语言对齐能力在真实语料上站得住。"
+  },
+  {
+    "query": "investment advice",
+    "expect": "note_only",
+    "note": "2026-09-15 新增，跨语言查询。结果跟中文查询'投资建议'高度重合（工程师的投资建议、芒格警告下的ETF策略、Bogleheads Guide 等），但第一名来自 Data_from_Claude_Suspended 下的 json 文件，路径本身不是稳定的判定字符串，只记录不做严格判定。"
+  },
+  {
+    "query": "圣诞节礼物推荐",
+    "expect": "empty",
+    "note": "2026-09-15 新增，语料外话题负例。目前会失败——实测凑出了 10 条弱相关结果（分数 -0.86~-2.24，都没跌破 _MIN_RERANK_SCORE=-2.5 阈值），查证过内容本身提取正确、不是乱码，只是跟'推荐'这个高频通用动词在语义空间里有弱关联。跟已有的'宠物疫苗接种记录'是同一类已知瑕疵，故意留着追踪，不是遗漏。"
+  },
+  {
+    "query": "减肥食谱",
+    "expect": "note_only",
+    "note": "2026-09-15 新增，语料外话题负例。只有 2 个候选通过重排序，内容是跑步后饮食调整建议，语义上确实沾边（都在聊'吃什么'），不是一个干净的零匹配案例，不做严格判定。"
+  },
+  {
+    "query": "宠物护理",
+    "expect": "empty",
+    "note": "2026-09-15 新增。跟已有的'宠物疫苗接种记录'案例同一个话题域，但这次措辞下正确返回空结果——两条案例都留着，用来观察同一个话题、不同措辞对这个已知瑕疵的触发是否稳定。"
+  },
+  {
+    "query": "手势冲突",
+    "expect": "match",
+    "top_result_should_contain": ["241-ReactNative", "Gesture"],
+    "note": "2026-09-15 新增。呼应 dynamic_classification_architecture.md 里 Bug A 涉及的那份 ReactNative 手势冲突文档（reasoning 生成曾经截断、导致 category 判错），验证检索层会不会被打标签环节的历史 bug 连累——实测精确命中，3 个候选全部相关，证明两个信号相对独立。"
+  },
+  {
+    "query": "关于坚持跑步的对话",
+    "expect": "match",
+    "top_result_should_contain": ["training with Gemini", "部门解散", "LT2", "半马", "状态回归"],
+    "note": "2026-09-15 新增，话题分离验证。11 个结果里混入了 2 条投资类对话（因为内容里提到跑步作为类比），但分数都在候选池末位（-1.75、-1.83），不影响排名靠前的结果。"
+  },
+  {
+    "query": "PTE",
+    "expect": "note_only",
+    "note": "2026-09-15 新增，专有名词精确检索。6 个候选全部跟 PTE 备考相关（备考对话、DI 满分模板、口语方略模版），但第一名来自 Data_from_Claude_Suspended 下的 json 文件，路径不是稳定判定字符串，只记录不做严格判定。"
+  },
+  {
+    "query": "Docker",
+    "expect": "match",
+    "top_result_should_contain": ["Docker", "Nest 通关秘籍"],
+    "note": "2026-09-15 新增，专有名词精确检索。25 个候选通过重排序，语料里 Docker 相关内容确实丰富（Nest 课程 + next_document 课程 + 对话List 技术讨论）。已知会混入一份代码文件（因为 URL 字面带 login.docker.com），分数压在末位。"
+  },
+  {
+    "query": "亲属表模板",
+    "expect": "match",
+    "top_result_should_contain": ["亲属表"],
+    "note": "2026-09-15 新增，验证文件名信号——目前会失败。真正文件名叫'日本签证紧急联系亲属表.pdf'的文件（上一轮查'日本签证'能精确命中它）这次完全没有出现在候选列表里，混进来的是几份代码文件（代码里字面出现 template/模板字样）。故意留着追踪：现在四路检索信号全部只处理 chunk 正文，从未把文件名作为独立信号，这是范围缺口，不是偶发 bug。"
   }
 ]
