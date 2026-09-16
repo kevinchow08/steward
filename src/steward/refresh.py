@@ -83,12 +83,18 @@ def _acquire_lock():
             old_pid = None
         if old_pid is not None and psutil.pid_exists(old_pid):
             return False
-        _log(f"发现上次异常退出留下的锁文件（记录的 PID {old_pid} 已不存在），已清理，继续本次运行。")
+        if old_pid is None:
+            _log("发现锁文件内容异常（读不出有效的 PID），已忽略并清理，继续本次运行。")
+        else:
+            _log(f"发现上次异常退出留下的锁文件（记录的 PID {old_pid} 已不存在），已清理，继续本次运行。")
     REFRESH_LOCK_PATH.write_text(str(os.getpid()), encoding="utf-8")
     return True
 
 
 def _release_lock():
+    # unlink() 删除的是整个文件（不是清空内容留一个空文件），删完之后
+    # REFRESH_LOCK_PATH.exists() 会变成 False，下次 _acquire_lock() 就不会
+    # 走"锁文件存在，要不要判断死锁"这条分支，直接写自己的 PID 拿到锁。
     try:
         REFRESH_LOCK_PATH.unlink()
     except FileNotFoundError:
@@ -236,6 +242,40 @@ def _build_plist_content(steward_executable, target_dirs, stdout_path, stderr_pa
 """
 
 
+def _find_steward_executable():
+    """定位当前环境里真正安装出来的 steward 入口脚本，返回绝对路径字符串。
+
+    真实踩过的坑：最初这里直接用 sys.argv[0]，理由是"这次调用本来就是
+    通过装好的 steward 命令触发的"——这个假设在开发时用
+    `python main.py schedule-setup` 触发（仓库根目录那个薄壳）时不成立，
+    sys.argv[0] 会是 main.py 自己的路径，不是真正的 steward 入口脚本。
+    main.py 本身没有可执行权限、也没有 shebang，结果是 plist 里写进了一个
+    launchd 根本执行不了的路径——真实后果：macOS "登录项与扩展"面板里能
+    看到一个来路不明的"main.py"，而且这个任务一旦被触发就会执行失败。
+
+    改用 sys.executable——它是当前这个 Python 解释器自己的绝对路径，不管
+    这次是被 main.py 还是被装好的 steward 命令触发，指向的都是同一个真
+    解释器。真正的 steward 入口脚本，跟这个解释器住在同一个 bin/ 目录下
+    （pip install 生成的时候就是这么放的，见 docs/系统与运行时基础知识
+    笔记.md 第四节），从这个解释器的路径推出 bin/ 目录，再找同目录下的
+    steward，不管从哪种方式调用，得到的都是同一份、真正可执行的路径。
+
+    注意：这里不能对 sys.executable 调用 .resolve()——venv 里的 python3
+    通常是指向系统解释器的符号链接（验证过，见 docs/系统与运行时基础
+    知识笔记.md 第七节），.resolve() 会一路穿透这条链接追到最底层的物理
+    文件（比如 Homebrew Cellar 目录深处），那个目录底下根本没有 steward
+    脚本——真实踩过：加了 .resolve() 之后在这台机器上实测直接报"找不到"。
+    sys.executable 本身已经是绝对路径，不需要再 resolve 一次。
+    """
+    candidate = Path(sys.executable).parent / "steward"
+    if not candidate.exists():
+        raise RuntimeError(
+            f"在 {candidate} 没找到 steward 入口脚本，"
+            "先在这个环境里跑一遍 `pip install -e .`（或者装好对应 wheel）再重试。"
+        )
+    return str(candidate)
+
+
 def setup_schedule(db_path=DEFAULT_DB_PATH):
     """生成/更新 launchd 的 WatchPaths 配置并重新加载，让 refresh 在数据库
     管理的目录发生变化时自动触发。
@@ -246,10 +286,6 @@ def setup_schedule(db_path=DEFAULT_DB_PATH):
     显式的手动步骤，不是自动触发（原因见 product_direction_and_roadmap.md
     里的讨论：不想让 index 命令悄悄产生"改系统级 launchd 配置"这种跟它本身
     职责无关、还可能失败的副作用）。
-
-    steward_executable 用 sys.argv[0] 取——这次调用本来就是通过安装好的
-    `steward` 命令触发的，sys.argv[0] 就是这个命令在当前环境下的真实绝对
-    路径，不用另外猜venv在哪，换一台机器/换一个虚拟环境自动跟着对。
     """
     with DocumentIndex(db_path) as index:
         target_dirs = index.list_target_dirs()
@@ -258,7 +294,12 @@ def setup_schedule(db_path=DEFAULT_DB_PATH):
         print("数据库里还没有任何被管理的目录，先跑几次 `steward index <目录>` 再设置监听。")
         return
 
-    steward_executable = str(Path(sys.argv[0]).resolve())
+    try:
+        steward_executable = _find_steward_executable()
+    except RuntimeError as e:
+        print(f"❌ {e}")
+        return
+
     stdout_path = REFRESH_LOG_PATH.parent / "refresh_stdout.log"
     stderr_path = REFRESH_LOG_PATH.parent / "refresh_stderr.log"
     plist_content = _build_plist_content(steward_executable, target_dirs, stdout_path, stderr_path)
