@@ -102,17 +102,25 @@ def _release_lock():
 
 
 def _llama_server_healthy(llm_base_url):
-    """探测 llama-server 是否在线，2 秒超时。不在线就让调用方直接跳过打
+    """探测 llama-server 是否在线，5 秒超时。不在线就让调用方直接跳过打
     标签这一步，不要让每一份待打标签的文档都空等两次失败重试——tagging.py
     里每份文档本身就有 2 次重试，llama-server 没启动的话，这个代价会被
     放大到全部待处理文档，纯粹浪费时间。
+
+    超时原本设的是 2 秒，真实撞过一次误判：refresh 触发的那一刻，
+    llama-server 正在处理一个真实的推理任务（单次请求总耗时超过 1 秒，
+    见真实日志），2 秒的窗口偶尔会被这种"服务器在但正忙"的情况顶到，
+    被误判成"不在线"，代价是那一轮保守跳过了打标签（不是崩溃/丢数据，
+    只是那一轮没打成）。调宽到 5 秒降低这种误判概率——服务器真的没启动
+    时是连接直接被拒绝，不会等到超时，所以调宽这个值不会让"真的不在线"
+    的判断变慢，只影响"在线但正忙"这种边界情况的容忍度。
     """
     base = llm_base_url.rstrip("/")
     if base.endswith("/v1"):
         base = base[: -len("/v1")]
     health_url = base.rstrip("/") + "/health"
     try:
-        resp = httpx.get(health_url, timeout=2.0)
+        resp = httpx.get(health_url, timeout=5.0)
         return resp.status_code == 200
     except httpx.HTTPError:
         return False

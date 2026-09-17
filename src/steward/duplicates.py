@@ -188,3 +188,70 @@ def move_to_trash(path):
     from send2trash import send2trash
 
     send2trash(str(path))
+
+
+def _candidate_trash_dirs(original_path):
+    """给一个文件原来所在的路径，返回它被删除时可能落进的废纸篓目录。
+
+    macOS 的废纸篓不是只有一个：本机磁盘统一用 ~/.Trash；外置盘各自有
+    独立的废纸篓，在 /Volumes/<盘名>/.Trashes/<当前用户 UID>/ 下——判断
+    逻辑跟 document_index._derive_volume_label() 判断"这个文件躺在哪块
+    盘上"是同一个思路（看路径是不是以 /Volumes/ 开头），只是这里要的是
+    实际的废纸篓目录路径，不是拿来展示的盘名字符串，所以单独写，不直接
+    复用那个函数。
+    """
+    import os
+
+    resolved = Path(original_path).resolve()
+    parts = resolved.parts
+    if len(parts) >= 3 and parts[1] == "Volumes":
+        volume_root = Path(*parts[:3])
+        return [volume_root / ".Trashes" / str(os.getuid())]
+    return [Path.home() / ".Trash"]
+
+
+def find_in_trash(sha256, size_bytes, original_path):
+    """在废纸篓里找一份内容（SHA256 + 大小）匹配的文件，返回它当前在
+    废纸篓里的路径；没找到返回 None。
+
+    不靠文件名匹配——文件移入废纸篓时，如果废纸篓里已经有同名文件，
+    macOS 会自动改名（加数字后缀），文件名不可靠；SHA256 和 size_bytes
+    是从删除日志（duplicates_cleanup_log.jsonl）里原样带过来的，删除
+    那一刻就记好了，是可靠的判断依据，不用重新猜。先比 size_bytes 再算
+    哈希，避免对废纸篓里每一个文件都算一遍哈希——跟 _group_by_content()
+    "先按大小分组、只对真正可能重复的文件算哈希"是同一个性能优化思路。
+
+    如果这份文件已经被还原过、或者废纸篓被清空过，这里自然会返回
+    None——调用方不需要额外判断"是不是已经还原过"，找不到就是找不到，
+    统一处理。
+    """
+    for trash_dir in _candidate_trash_dirs(original_path):
+        if not trash_dir.exists():
+            continue
+        for candidate in trash_dir.iterdir():
+            if not candidate.is_file():
+                continue
+            try:
+                if candidate.stat().st_size != size_bytes:
+                    continue
+                if _hash_file(candidate) == sha256:
+                    return candidate
+            except (FileNotFoundError, PermissionError):
+                continue
+    return None
+
+
+def restore_from_trash(trash_path, original_path):
+    """把废纸篓里的文件挪回原来的路径。
+
+    如果原路径现在已经有文件了（用户后来自己在那个位置又新建/放了一份
+    同名文件），拒绝覆盖，抛出异常交给调用方处理——这是行动层操作，宁可
+    保守报错，不做任何可能悄悄覆盖用户新数据的隐式操作。
+    """
+    import shutil
+
+    original_path = Path(original_path)
+    if original_path.exists():
+        raise FileExistsError(f"原路径已经有文件了，不覆盖: {original_path}")
+    original_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(trash_path), str(original_path))

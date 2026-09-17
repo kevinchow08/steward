@@ -529,6 +529,82 @@ def run_duplicates_clean(target_dir, db_path):
         print(f"操作日志: {log_path}")
 
 
+def run_duplicates_undo(target_dir, db_path):
+    """交互式还原——读之前 `--clean` 留下的操作日志，逐条确认后把文件从
+    废纸篓挪回原来的路径。
+
+    日志文件的定位方式，跟 `--clean` 写日志时用的是同一份逻辑
+    （`_report_tag(target_dir, db_path)`），保证 `--undo` 读到的正是同一
+    个来源当时 `--clean` 留下的那份日志，不用额外传参数指定。
+
+    日志本身不会因为还原了就被改动或删掉——它是操作历史，不是实时状态，
+    这一点跟 `run_duplicates_clean()` 里的说明是同一个原则（类比 git
+    commit 记录不会因为后来被 revert 就从历史里消失）。这意味着同一份
+    日志可以放心重复跑 `--undo`：已经还原过的记录，在废纸篓里自然找不到
+    对应文件了（find_in_trash 会返回 None），会被如实报告"没找到"，不会
+    被误判成出错，也不会尝试覆盖已经还原到原位的文件。
+    """
+    import json
+
+    from steward.duplicates import find_in_trash, restore_from_trash
+
+    log_path = OUTPUT_DIR / f"duplicates_cleanup_log_{_report_tag(target_dir, db_path)}.jsonl"
+
+    if not log_path.exists():
+        print(f"没有找到对应的清理日志: {log_path}")
+        print("（--undo 只能还原通过 --clean 删除过的文件，还没执行过清理就没有可还原的记录。）")
+        return
+
+    entries = []
+    with open(log_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                entries.append(json.loads(line))
+
+    if not entries:
+        print("日志是空的，没有可还原的记录。")
+        return
+
+    print(f"共 {len(entries)} 条删除记录，逐条确认要不要还原。")
+    print("每条输入：回车=还原 / s=跳过 / q=退出\n")
+
+    total_restored = 0
+    try:
+        for index, entry in enumerate(entries, start=1):
+            print(f"--- 第 {index}/{len(entries)} 条 ---")
+            print(f"  删除时间: {entry['timestamp']}")
+            print(f"  被删路径: {entry['deleted_path']}")
+            print(f"  当时保留: {entry['kept_path']}")
+
+            choice = input("请选择: ").strip().lower()
+            if choice == "q":
+                print("已退出，后续未处理的记录不受影响。\n")
+                break
+            if choice == "s" or choice == "n":
+                print("已跳过。\n")
+                continue
+
+            trash_path = find_in_trash(entry["sha256"], entry["size_bytes"], entry["deleted_path"])
+            if trash_path is None:
+                print("  [Warning] 废纸篓里没找到匹配的文件——可能已经被清空、已经手动还原过，或者被移动过。\n")
+                continue
+
+            try:
+                restore_from_trash(trash_path, entry["deleted_path"])
+            except FileExistsError as e:
+                print(f"  [Warning] 还原失败，{e}\n")
+                continue
+
+            total_restored += 1
+            print(f"  已还原到: {entry['deleted_path']}\n")
+    except KeyboardInterrupt:
+        print("\n已中断，已经还原过的不受影响，还没处理的记录不会有任何改动。")
+
+    print("-" * 50)
+    print(f"共还原 {total_restored} 个文件。")
+
+
 def main():
     # 四个子命令都要一份一模一样的 --db 参数（路径、默认值、help 文案全部相同），
     # 之前是每个子命令各自重复写一遍。argparse 自带 parents= 机制专门解决这种
@@ -656,6 +732,15 @@ def main():
             "废纸篓（可撤销，不是永久删除）。不加这个参数就还是原来的只读报告。"
         ),
     )
+    duplicates_parser.add_argument(
+        "--undo",
+        action="store_true",
+        help=(
+            "交互式还原：读取之前 --clean 留下的操作日志，逐条确认后把文件从"
+            "废纸篓挪回原来的路径。跟 --clean 是同一个来源（同一个 target_dir/"
+            "--db），不能跟 --clean 同时使用。"
+        ),
+    )
 
     refresh_parser = subparsers.add_parser(
         "refresh",
@@ -690,7 +775,11 @@ def main():
     elif args.command == "tags":
         run_tags(args.db, tag_query=args.tag)
     elif args.command == "duplicates":
-        if args.clean:
+        if args.clean and args.undo:
+            parser.error("--clean 和 --undo 不能同时使用")
+        elif args.undo:
+            run_duplicates_undo(args.target_dir, args.db)
+        elif args.clean:
             run_duplicates_clean(args.target_dir, args.db)
         else:
             run_duplicates(args.target_dir, args.db)
