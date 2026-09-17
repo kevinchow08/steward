@@ -537,14 +537,18 @@ def run_duplicates_undo(target_dir, db_path):
     （`_report_tag(target_dir, db_path)`），保证 `--undo` 读到的正是同一
     个来源当时 `--clean` 留下的那份日志，不用额外传参数指定。
 
-    日志本身不会因为还原了就被改动或删掉——它是操作历史，不是实时状态，
-    这一点跟 `run_duplicates_clean()` 里的说明是同一个原则（类比 git
-    commit 记录不会因为后来被 revert 就从历史里消失）。这意味着同一份
-    日志可以放心重复跑 `--undo`：已经还原过的记录，在废纸篓里自然找不到
-    对应文件了（find_in_trash 会返回 None），会被如实报告"没找到"，不会
-    被误判成出错，也不会尝试覆盖已经还原到原位的文件。
+    日志本身不会因为还原了就被改动/重写/删除任何一条旧记录——它是操作
+    历史，不是实时状态，这一点跟 `run_duplicates_clean()` 里的说明是同一
+    个原则（类比 git commit 记录不会因为后来被 revert 就从历史里消失）。
+    但每次成功还原，会**追加**一条新的"还原记录"到同一份日志里（`"action":
+    "restored"`，区别于原有删除记录的字段结构），这样这份日志文件本身就
+    能看出"哪些已经还原过"，不用非得重新跑一遍 `--undo`、靠运行时的
+    "没找到"提示才知道——这是真实用户反馈发现的可用性缺口，之前的版本
+    日志完全不变，只能靠运行时判断，现在补上。有了这份记录，重新跑
+    `--undo` 会直接跳过已经还原过的条目，连交互都不用问，不会重复提示。
     """
     import json
+    from datetime import datetime
 
     from steward.duplicates import find_in_trash, restore_from_trash
 
@@ -555,27 +559,40 @@ def run_duplicates_undo(target_dir, db_path):
         print("（--undo 只能还原通过 --clean 删除过的文件，还没执行过清理就没有可还原的记录。）")
         return
 
-    entries = []
+    # 删除记录和还原记录混在同一份文件里（都是追加写），靠字段结构区分：
+    # 删除记录有 "deleted_path"，还原记录有 "restored_path"（故意用不同的
+    # 字段名，不是共用 "deleted_path"，避免两种记录在下面的判断里混淆）。
+    delete_entries = []
+    already_restored = set()
     with open(log_path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if line:
-                entries.append(json.loads(line))
+            if not line:
+                continue
+            record = json.loads(line)
+            if "restored_path" in record:
+                already_restored.add((record["sha256"], record["restored_path"]))
+            else:
+                delete_entries.append(record)
 
-    if not entries:
+    if not delete_entries:
         print("日志是空的，没有可还原的记录。")
         return
 
-    print(f"共 {len(entries)} 条删除记录，逐条确认要不要还原。")
+    print(f"共 {len(delete_entries)} 条删除记录，逐条确认要不要还原。")
     print("每条输入：回车=还原 / s=跳过 / q=退出\n")
 
     total_restored = 0
     try:
-        for index, entry in enumerate(entries, start=1):
-            print(f"--- 第 {index}/{len(entries)} 条 ---")
+        for index, entry in enumerate(delete_entries, start=1):
+            print(f"--- 第 {index}/{len(delete_entries)} 条 ---")
             print(f"  删除时间: {entry['timestamp']}")
             print(f"  被删路径: {entry['deleted_path']}")
             print(f"  当时保留: {entry['kept_path']}")
+
+            if (entry["sha256"], entry["deleted_path"]) in already_restored:
+                print("  这条之前已经还原过了，自动跳过。\n")
+                continue
 
             choice = input("请选择: ").strip().lower()
             if choice == "q":
@@ -587,7 +604,7 @@ def run_duplicates_undo(target_dir, db_path):
 
             trash_path = find_in_trash(entry["sha256"], entry["size_bytes"], entry["deleted_path"])
             if trash_path is None:
-                print("  [Warning] 废纸篓里没找到匹配的文件——可能已经被清空、已经手动还原过，或者被移动过。\n")
+                print("  [Warning] 废纸篓里没找到匹配的文件——可能已经被清空、被手动还原过，或者被移动过。\n")
                 continue
 
             try:
@@ -597,6 +614,18 @@ def run_duplicates_undo(target_dir, db_path):
                 continue
 
             total_restored += 1
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(
+                    json.dumps(
+                        {
+                            "timestamp": datetime.now().isoformat(timespec="seconds"),
+                            "sha256": entry["sha256"],
+                            "restored_path": entry["deleted_path"],
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
             print(f"  已还原到: {entry['deleted_path']}\n")
     except KeyboardInterrupt:
         print("\n已中断，已经还原过的不受影响，还没处理的记录不会有任何改动。")
