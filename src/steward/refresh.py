@@ -27,6 +27,7 @@ import psutil
 
 from steward.document_index import DocumentIndex
 from steward.paths import (
+    APP_DATA_DIR,
     DEFAULT_DB_PATH,
     REFRESH_LAST_RUN_PATH,
     REFRESH_LOCK_PATH,
@@ -53,7 +54,6 @@ def _log(message):
     run_refresh() 的每一个分支（正常完成/节流跳过/锁挡住/目录不可达/
     llama-server 不在线）都要被调用一次，不能有任何"安静地结束"的路径。
     """
-    REFRESH_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(REFRESH_LOG_PATH, "a", encoding="utf-8") as f:
         f.write(f"[{_utc_now_iso()}] {message}\n")
 
@@ -71,11 +71,12 @@ def _check_throttle():
     return elapsed < THROTTLE_SECONDS
 
 
-def _acquire_lock():
-    """PID 锁：已经有一次真的在跑就返回 False（应该跳过）；上次异常崩溃
-    留下的死锁（记录的 PID 已经不存在了）自动清理掉，返回 True 继续跑。
+def _try_acquire_lock():
+    """尝试拿 PID 锁，不阻塞：已经有一次真的在跑就返回 False（调用方应该
+    跳过）；上次异常崩溃留下的死锁（记录的 PID 已经不存在了）自动清理掉，
+    返回 True 继续跑。叫 try_ 是因为"拿不到"是正常结果，不是异常，也不会
+    等——跟 threading.Lock.acquire(blocking=False) 是同一个约定。
     """
-    REFRESH_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     if REFRESH_LOCK_PATH.exists():
         try:
             old_pid = int(REFRESH_LOCK_PATH.read_text(encoding="utf-8").strip())
@@ -93,7 +94,7 @@ def _acquire_lock():
 
 def _release_lock():
     # unlink() 删除的是整个文件（不是清空内容留一个空文件），删完之后
-    # REFRESH_LOCK_PATH.exists() 会变成 False，下次 _acquire_lock() 就不会
+    # REFRESH_LOCK_PATH.exists() 会变成 False，下次 _try_acquire_lock() 就不会
     # 走"锁文件存在，要不要判断死锁"这条分支，直接写自己的 PID 拿到锁。
     try:
         REFRESH_LOCK_PATH.unlink()
@@ -134,15 +135,18 @@ def run_refresh(db_path=DEFAULT_DB_PATH, llm_base_url=None):
 
     llm_base_url = llm_base_url or DEFAULT_LLM_BASE_URL
 
+    # 状态文件（锁/日志/节流时间戳）都放在这个目录下，统一在入口建一次——
+    # 全新机器上没跑过 index 就直接手敲 steward refresh 时，这个目录可能还
+    # 不存在，不建的话下面第一次写文件会抛 FileNotFoundError。
+    APP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
     if _check_throttle():
         _log("触发被节流：距离上次运行不到设定的时间窗口，本次跳过。")
         return {"skipped": "throttled"}
 
-    if not _acquire_lock():
+    if not _try_acquire_lock():
         _log("触发被重叠保护挡住：上一次 refresh 还在跑，本次跳过。")
         return {"skipped": "already_running"}
-
-    REFRESH_LAST_RUN_PATH.write_text(_utc_now_iso(), encoding="utf-8")
 
     started_at = time.monotonic()
     result = {
@@ -152,7 +156,11 @@ def run_refresh(db_path=DEFAULT_DB_PATH, llm_base_url=None):
         "tag_skipped_reason": None,
     }
 
+    # try 必须紧跟在拿锁之后：拿锁和 finally 里的释放之间，不能隔着任何可能
+    # 抛异常的代码（比如下面这次写文件失败，锁就泄漏了）。
     try:
+        REFRESH_LAST_RUN_PATH.write_text(_utc_now_iso(), encoding="utf-8")
+
         with DocumentIndex(db_path) as index:
             target_dirs = index.list_target_dirs()
 
