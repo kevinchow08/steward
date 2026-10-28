@@ -3,13 +3,20 @@
 
 设计背景见 docs/product_direction_and_roadmap.md 里"数据库管理目录的自动
 增量刷新"那段讨论：方案是"launchd 触发一次性命令"，不是常驻进程——不用的
-时候零资源占用，需要跑的时候由操作系统负责叫醒。具体触发方式用 launchd
-的 WatchPaths（数据库管理的目录有变化就触发），不是简单的定时轮询，配合
-下面的节流机制避免用户高强度改文件时被连续拉起来跑好几次。
+时候零资源占用，需要跑的时候由操作系统负责叫醒。触发方式有两种，都写在同
+一份 plist 里：
+- WatchPaths：数据库管理的目录有变化就触发，配合下面的节流机制避免用户高强度
+  改文件时被连续拉起来跑好几次。
+- StartInterval（兜底）：不管有没有文件变化，每隔一段时间也触发一次。补两个
+  只靠 WatchPaths 补不上的洞：① 没有文件变化就永远没有触发，llama-server 不在线
+  时欠下的打标签任务会一直躺着；② 万一 WatchPaths 漏了某次变化，下一次兜底触发
+  时增量扫描会把它补上。
 
-三个真实边界情况，对应下面三处设计：
+四个真实边界情况，对应下面几处设计：
 1. 上次没跑完，这次又被触发了（重叠保护）——PID 锁文件 + psutil 判活。
 2. llama-server 没启动，打标签不能拖垮整个任务——跑 tag 前先探测 /health。
+   LLM 打标签被跳过时，不依赖 LLM 的基础类型标签照做，并且把"还欠多少份"
+   写进日志，不让欠账静默堆积。
 3. 失败要写日志，不能悄悄丢失——launchd 触发的任务没有终端可看，refresh.log
    是唯一能事后查的地方，不管这次是正常完成、被节流跳过、还是被锁挡住，
    都要留一条记录。
@@ -39,6 +46,13 @@ from steward.paths import (
 # 算出来的，是"比一次正常 refresh 的耗时宽松几倍"的经验值，之后发现不合适
 # 再调（调大/调小都只影响这一个常量，不涉及其它逻辑）。
 THROTTLE_SECONDS = 30 * 60
+
+# 兜底触发的间隔（写进 plist 的 StartInterval）。必须明显大于上面的节流窗口，
+# 否则兜底触发会被节流挡掉、等于白设。3 小时是经验值：每次兜底触发即使什么
+# 都没变，也要加载一次 embedding 模型+扫一遍目录（几秒到十几秒），不值得更
+# 频繁；又不能太久，否则欠账补得太慢。注意 StartInterval 在电脑睡眠期间不会
+# 触发，唤醒后补一次。改这个值之后要重跑 `steward schedule-setup` 才会生效。
+FALLBACK_INTERVAL_SECONDS = 3 * 60 * 60
 
 LAUNCHD_LABEL = "com.steward.refresh"
 LAUNCHD_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
@@ -131,7 +145,12 @@ def run_refresh(db_path=DEFAULT_DB_PATH, llm_base_url=None):
     """跑一次增量刷新。返回一份统计字典，供 CLI 打印；不管结果如何，都会
     往 REFRESH_LOG_PATH 追加一条摘要。
     """
-    from steward.tagging import DEFAULT_LLM_BASE_URL
+    from steward.tagging import (
+        DEFAULT_LLM_BASE_URL,
+        count_pending_semantic_tagging,
+        run_basic_tagging,
+        run_tagging_pipeline,
+    )
 
     llm_base_url = llm_base_url or DEFAULT_LLM_BASE_URL
 
@@ -154,6 +173,8 @@ def run_refresh(db_path=DEFAULT_DB_PATH, llm_base_url=None):
         "unreachable_dirs": [],
         "tag_stats": None,
         "tag_skipped_reason": None,
+        "basic_tagged_count": 0,
+        "pending_tag_count": None,
     }
 
     # try 必须紧跟在拿锁之后：拿锁和 finally 里的释放之间，不能隔着任何可能
@@ -192,10 +213,18 @@ def run_refresh(db_path=DEFAULT_DB_PATH, llm_base_url=None):
                     result["unreachable_dirs"].append(target_dir)
                     _log(f"[Warning] 处理该目录时出现意外错误，跳过，不影响其它目录: {target_dir}（{e}）")
 
+        # 基础类型标签（图片/压缩包等"只能识别出是什么类型"的文件）不需要 LLM，
+        # llama-server 在不在线都照做——以前它跟 LLM 打标签绑在同一个步骤里，
+        # llama-server 一离线，新增的图片连"这是个图片"这样最浅的标签都拿不到。
+        try:
+            with DocumentIndex(db_path) as index:
+                result["basic_tagged_count"] = run_basic_tagging(index)
+            _log(f"基础类型标签: 新处理 {result['basic_tagged_count']} 份（不依赖 llama-server）")
+        except Exception as e:
+            _log(f"[Warning] 基础类型标签处理出现意外错误，不影响后续步骤: {e}")
+
         if _llama_server_healthy(llm_base_url):
             try:
-                from steward.tagging import run_tagging_pipeline
-
                 with DocumentIndex(db_path) as index:
                     tag_stats = run_tagging_pipeline(index=index, llm_base_url=llm_base_url)
                 result["tag_stats"] = tag_stats
@@ -208,7 +237,16 @@ def run_refresh(db_path=DEFAULT_DB_PATH, llm_base_url=None):
                 _log(f"[Warning] 打标签过程中出现意外错误，本次 index 部分的结果不受影响: {e}")
         else:
             result["tag_skipped_reason"] = "llama-server 不在线"
-            _log(f"llama-server（{llm_base_url}）不在线，本次跳过打标签，只完成了 index 部分。")
+            # 欠账不能静默：把"还有多少份在等 LLM 打标签"写进日志。这些文档不会
+            # 丢，下一次触发（文件变化，或者 StartInterval 兜底）时 llama-server
+            # 在线的话会被增量逻辑自动补上。
+            try:
+                with DocumentIndex(db_path) as index:
+                    result["pending_tag_count"] = count_pending_semantic_tagging(index)
+                pending_note = f"待打标签 {result['pending_tag_count']} 份，等 llama-server 上线后的下一次触发补上"
+            except Exception as e:
+                pending_note = f"（统计待打标签数量失败: {e}）"
+            _log(f"llama-server（{llm_base_url}）不在线，本次跳过 LLM 打标签，只完成了 index 和基础类型标签；{pending_note}。")
 
         elapsed = time.monotonic() - started_at
         result["elapsed_seconds"] = elapsed
@@ -248,6 +286,9 @@ def _build_plist_content(steward_executable, target_dirs, stdout_path, stderr_pa
     <array>
 {watch_paths_xml}
     </array>
+
+    <key>StartInterval</key>
+    <integer>{FALLBACK_INTERVAL_SECONDS}</integer>
 
     <key>StandardOutPath</key>
     <string>{_xml_escape(stdout_path)}</string>
@@ -337,4 +378,5 @@ def setup_schedule(db_path=DEFAULT_DB_PATH):
     print(f"✅ 已注册/更新 launchd 监听任务，正在监听 {len(target_dirs)} 个目录：")
     for d in target_dirs:
         print(f"   - {d}")
+    print(f"兜底触发：另外每 {FALLBACK_INTERVAL_SECONDS // 3600} 小时无论有没有文件变化也会触发一次（睡眠期间不触发，唤醒后补一次）")
     print(f"配置文件: {LAUNCHD_PLIST_PATH}")

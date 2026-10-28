@@ -257,6 +257,85 @@ def _tag_project(client: OpenAI, model_name: str, project_path: str, summary: st
     return None
 
 
+def _basic_tagging_results(index, force=False):
+    """算出"基础类型标签"，返回 {document_id: TaggingResult}，不写库。
+
+    对象：图片/视频/压缩包等非文档类型、或提取失败的文件（没有"成功提取"的
+    extraction）。不调用 SLM，直接用 Week 1 已经算好的 basic_type + 扩展名补
+    一道浅层标签，用 status="basic" 跟真正走过语义理解的 "tagged" 区分开，
+    讲清楚这批文件只做了类型识别。
+
+    **完全不依赖 llama-server 和 embedding 模型**——所以 refresh 在 llama-server
+    不在线时也能照样做这一步，不用跟 LLM 打标签捆在一起。
+
+    force=False（默认）只处理"还没有打标签结果"的文件，已经有的跳过。以前这里
+    每次都对全部这类文件重写一遍（真实库里 1000 多份），单独拿出来被 refresh
+    频繁调用之后这个代价就不能忽略了，所以改成增量。代价：基础标签的内容只由
+    basic_type 和扩展名决定，如果以后改了 basic_type 的分类规则，老文件的基础
+    标签不会自动更新，需要 force=True 重跑——跟 LLM 打标签"改了 prompt 要 force"
+    是同一类取舍。
+    """
+    not_yet_tagged = "" if force else "AND d.id NOT IN (SELECT document_id FROM tagging_results)"
+    rows = index.connection.execute(
+        f"""
+        SELECT d.id AS document_id, d.path AS path, d.basic_type AS basic_type
+        FROM documents d
+        WHERE d.is_present = 1
+          AND d.id NOT IN (SELECT document_id FROM extractions WHERE status = 'success')
+          {not_yet_tagged}
+        """
+    ).fetchall()
+
+    results = {}
+    for row in rows:
+        basic_type = row["basic_type"] or "unknown"
+        ext = os.path.splitext(row["path"])[1].lstrip(".").lower() or "无扩展名"
+        results[row["document_id"]] = TaggingResult(
+            tags=[(basic_type, 1.0), (ext, 1.0)],
+            confidence=0.0,
+            status="basic",
+            reasoning="非文档类型或未成功提取文本，仅做基础类型识别，未做语义内容分析",
+        )
+    return results
+
+
+def run_basic_tagging(index, force=False):
+    """只做基础类型标签并写库，返回这次处理了多少份。不需要 llama-server，
+    也不加载任何模型，几乎是纯数据库操作。"""
+    results = _basic_tagging_results(index, force=force)
+    for doc_id, result in results.items():
+        index.save_tagging_result(
+            document_id=doc_id,
+            tags=result.tags,
+            confidence=result.confidence,
+            status=result.status,
+            reasoning=result.reasoning,
+        )
+    return len(results)
+
+
+def count_pending_semantic_tagging(index):
+    """统计"需要调用 LLM、但还没打上标签"的文档数（含代码项目），不写库。
+
+    条件跟 run_tagging_pipeline 里增量判断的条件是同一个定义：已经成功提取了
+    文本，并且没有标签结果，或者提取时间比标签结果新。如果以后改了那边的增量
+    条件，这里要同步改，不然统计出来的"待办数"会跟实际会处理的对不上。
+
+    用途：refresh 在 llama-server 不在线、被迫跳过打标签时，把这个数字写进日志，
+    让"欠了多少账"不再是静默的。
+    """
+    return index.connection.execute(
+        """
+        SELECT COUNT(*)
+        FROM documents d
+        JOIN extractions x ON x.document_id = d.id
+        LEFT JOIN tagging_results tr ON tr.document_id = d.id
+        WHERE d.is_present = 1 AND x.status = 'success'
+          AND (tr.document_id IS NULL OR x.created_at > tr.created_at)
+        """
+    ).fetchone()[0]
+
+
 def run_tagging_pipeline(
     index,
     embedder=None,
@@ -468,28 +547,12 @@ def run_tagging_pipeline(
             tags=[], confidence=0.0, status="untagged", reasoning="SLM 输出 JSON 解析失败",
         )
 
-    # Stage 基础标签：图片/视频/压缩包等非文档类型、或提取失败的文件，不调用 SLM，
-    # 直接用 Week 1 已经算好的 basic_type 补一道浅层标签，跟真正走过语义理解的结果
-    # 用 status 区分开（"basic" vs "tagged"），讲清楚这批文件只做了类型识别。
-    basic_rows = index.connection.execute(
-        """
-        SELECT d.id AS document_id, d.path AS path, d.basic_type AS basic_type
-        FROM documents d
-        WHERE d.is_present = 1
-          AND d.id NOT IN (SELECT document_id FROM extractions WHERE status = 'success')
-        """
-    ).fetchall()
-    for row in basic_rows:
-        basic_type = row["basic_type"] or "unknown"
-        ext = os.path.splitext(row["path"])[1].lstrip(".").lower() or "无扩展名"
-        final_results[row["document_id"]] = TaggingResult(
-            tags=[(basic_type, 1.0), (ext, 1.0)],
-            confidence=0.0,
-            status="basic",
-            reasoning="非文档类型或未成功提取文本，仅做基础类型识别，未做语义内容分析",
-        )
-    if basic_rows:
-        print(f"[Step 4] {len(basic_rows)} 份非文档类型/提取失败的文件，完成基础标签。", flush=True)
+    # Stage 基础标签：逻辑已经拆成独立函数（见 _basic_tagging_results），这里只是
+    # 把它的结果并进来一起持久化。
+    basic_results = _basic_tagging_results(index, force=force)
+    final_results.update(basic_results)
+    if basic_results:
+        print(f"[Step 4] {len(basic_results)} 份非文档类型/提取失败的文件，完成基础标签。", flush=True)
 
     # Stage 持久化——注意这里不再在外面包一层 with index.connection:。之前那样
     # 写会让人以为"整批要么全部提交、要么全部回滚"，实测验证过这个保证不成立：

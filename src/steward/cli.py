@@ -181,7 +181,7 @@ def run_tag(db_path, max_workers=8, force=False, llm_base_url=None):
     print(f"内容过短跳过: {stats['skipped_short_count']} 份")
     print(f"SLM 解析失败: {stats['parse_failed_count']} 份")
     print(f"深度打标签: {stats['tagged_count']} 份")
-    print(f"基础类型识别（非文档类型/未成功提取文本）: {stats['basic_count']} 份")
+    print(f"基础类型识别（非文档类型/未成功提取文本，本次新处理；已有的跳过，--force 全部重做）: {stats['basic_count']} 份")
     print(f"未打标签 (untagged): {stats['untagged_count']} 份")
     print(f"代码项目: {stats['project_count']} 个（{stats['project_tagged_count']} 个已打标签，"
           f"{stats['project_failed_count']} 个失败）")
@@ -289,11 +289,16 @@ def run_refresh(db_path, llm_base_url=None):
         print(f"，{len(result['unreachable_dirs'])} 个目录不可达/出错", end="")
     print()
 
+    print(f"基础类型标签：新处理 {result['basic_tagged_count']} 份")
+
     if result["tag_stats"] is not None:
         stats = result["tag_stats"]
         print(f"tag 完成：深度打标签 {stats['tagged_count']} 份，内容没变跳过 {stats['skipped_up_to_date_count']} 份")
     else:
-        print(f"跳过打标签：{result['tag_skipped_reason']}")
+        print(f"跳过 LLM 打标签：{result['tag_skipped_reason']}", end="")
+        if result["pending_tag_count"] is not None:
+            print(f"（待打标签 {result['pending_tag_count']} 份，下次触发时补）", end="")
+        print()
 
     print(f"总耗时: {result['elapsed_seconds']:.1f} 秒")
     print(f"详细日志: {REFRESH_LOG_PATH}")
