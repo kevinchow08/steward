@@ -1,0 +1,1078 @@
+{
+ "_说明": [
+  "检索评测集。路径相对于用户主目录（~）。以 / 结尾的条目代表'这个文件夹下的全部文件'，运行时按数据库展开。",
+  "relevant：用户真正想找的文件，算命中、也算召回分母。acceptable：出现了不算错、也不算命中——计算指标前从结果里剔除，不占名次。",
+  "status：draft = 起草者猜的标注，待项目主人确认；confirmed = 项目主人确认过。",
+  "split：tune = 调参集，平时实验看它；holdout = 留出集，只在决定是否合入时跑，防止只对调参集有效。",
+  "范围：只评测文档检索。图片和 apk 暂不做，不进 relevant；同一查询下出现的图片放 acceptable。"
+ ],
+ "cases": [
+  {
+   "id": "K01",
+   "query": "身份证",
+   "type": "known_item",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/日本签证材料/身份证正反面.pdf",
+    "Documents/doc/周凯文_住房补贴相关/身份证正反面.pdf"
+   ],
+   "acceptable": [
+    "Documents/doc/符娴的日本签证材料/身份证.jpg"
+   ],
+   "note": "三份都是扫描件/照片，目前没有可提取文字"
+  },
+  {
+   "id": "K02",
+   "query": "劳动合同",
+   "type": "known_item",
+   "split": "holdout",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/周凯文_住房补贴相关/劳动合同（1）.pdf",
+    "Documents/doc/周凯文_住房补贴相关/劳动合同（2）.pdf",
+    "Documents/doc/周凯文_住房补贴相关/劳动合同（3）.pdf"
+   ],
+   "acceptable": [],
+   "note": "扫描件，没有可提取文字"
+  },
+  {
+   "id": "K03",
+   "query": "租房合同",
+   "type": "known_item",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/周凯文_住房补贴相关/房屋租赁合同.pdf"
+   ],
+   "acceptable": [],
+   "note": "查询词和文件名不完全一致（租房 vs 房屋租赁）；扫描件"
+  },
+  {
+   "id": "K04",
+   "query": "毕业证",
+   "type": "known_item",
+   "split": "holdout",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/周凯文_住房补贴相关/毕业证书.pdf"
+   ],
+   "acceptable": [],
+   "note": "扫描件"
+  },
+  {
+   "id": "K05",
+   "query": "符娴的收入证明",
+   "type": "known_item",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/符娴的日本签证材料/符娴的收入证明.pdf"
+   ],
+   "acceptable": [
+    "Documents/doc/日本签证材料/收入证明.pdf",
+    "Documents/doc/日本单次旅游/自由职业者收入来源说明-日本.docx"
+   ],
+   "note": "指定了人名，别人的收入证明只算可接受"
+  },
+  {
+   "id": "K06",
+   "query": "户口本",
+   "type": "known_item",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/日本签证材料/户主.pdf",
+    "Documents/doc/日本签证材料/首页.pdf",
+    "Documents/doc/符娴的日本签证材料/本人户口.jpg",
+    "Documents/doc/符娴的日本签证材料/户主户口1.jpg",
+    "Documents/doc/符娴的日本签证材料/户主页2.jpg"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "K07",
+   "query": "注销 Apple ID",
+   "type": "known_item",
+   "split": "holdout",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/draft/注销Apple ID的访问代码.txt"
+   ],
+   "acceptable": [],
+   "note": "正文只有一串数字，只能靠文件名找到"
+  },
+  {
+   "id": "K08",
+   "query": "亲属表模板",
+   "type": "known_item",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/日本单次旅游/亲属表填写模板.pdf",
+    "Documents/doc/日本单次旅游/日本签证紧急联系亲属表.pdf 18-10-19-368.pdf",
+    "Documents/doc/日本签证材料/日本签证紧急联系亲属表.pdf",
+    "Documents/doc/符娴的日本签证材料/亲属表填写模板.pdf",
+    "Documents/doc/符娴的日本签证材料/日本签证紧急联系亲属表.pdf"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "K09",
+   "query": "RAG 系统开发方案",
+   "type": "known_item",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/RAG系统开发方案 - 完整版.md"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "K10",
+   "query": "试用期述职报告",
+   "type": "known_item",
+   "split": "holdout",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/周凯文的试用期述职报告.md"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "K11",
+   "query": "杨靖彤的简历",
+   "type": "known_item",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/简历/前端开发工程师(A171029)-杨靖彤-阿尔伯塔大学.pdf.pdf"
+   ],
+   "acceptable": [],
+   "note": "别人的简历不可接受"
+  },
+  {
+   "id": "K12",
+   "query": "在职证明模板",
+   "type": "known_item",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/日本单次旅游/日本单次电子签证在职证明模板.docx"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "K13",
+   "query": "llama.cpp 本地推理的笔记",
+   "type": "known_item",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/llama.cpp 本地推理实践.md"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "K14",
+   "query": "龙虾U盘",
+   "type": "known_item",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/小龙虾U盘业务评估.pdf",
+    "Documents/doc/个人技术文档输出/忆捷Openclaw龙虾U盘使用教程.pdf"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "K17",
+   "query": "Architecting AI Agents 那份 pdf",
+   "type": "known_item",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/Architecting_AI_Agents.pdf"
+   ],
+   "acceptable": [],
+   "note": "pdf 提取不出文字，只能靠文件名"
+  },
+  {
+   "id": "D01",
+   "query": "个人所得税纳税记录",
+   "type": "doc_type",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/周凯文_住房补贴相关/个人所得税纳税清单（深圳） (1).pdf",
+    "Documents/doc/周凯文_住房补贴相关/个人所得税纳税清单（深圳）.pdf"
+   ],
+   "acceptable": [
+    "Documents/doc/符娴的日本签证材料/纳税记录1.jpg",
+    "Documents/doc/符娴的日本签证材料/纳税记录2.jpg"
+   ],
+   "note": ""
+  },
+  {
+   "id": "D02",
+   "query": "2025年二季度的餐饮发票",
+   "type": "doc_type",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/报销相关/2025二季度发票/"
+   ],
+   "acceptable": [
+    "Documents/报销相关/2025二季度发票/25 年Q2应用后台研发部经费申请-雷克沙.xlsx"
+   ],
+   "note": "时间信息只在文件夹名里；Q2 经费申请表算可接受（runner 会先把可接受的剔出 relevant）"
+  },
+  {
+   "id": "D03",
+   "query": "团建活动经费审批",
+   "type": "doc_type",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/报销相关/2024年度团建活动审批表.xlsx",
+    "Documents/报销相关/OP03-AD0019 江波龙集团年度团建活动经费管理办法.pdf"
+   ],
+   "acceptable": [
+    "Documents/报销相关/团建发票1.pdf",
+    "Documents/报销相关/团建发票2.pdf",
+    "Documents/报销相关/2024年底经费记录.txt"
+   ],
+   "note": ""
+  },
+  {
+   "id": "D04",
+   "query": "社保缴费证明",
+   "type": "doc_type",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/日本签证材料/参保证明下载.pdf",
+    "Documents/doc/符娴的日本签证材料/参保证明.pdf",
+    "Documents/doc/周凯文_住房补贴相关/社保缴费清单--周凯文.pdf"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "D05",
+   "query": "研发部经费申请表",
+   "type": "doc_type",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/报销相关/24 年Q3应用后台研发部经费申请-江波龙.xlsx",
+    "Documents/报销相关/2025二季度发票/25 年Q2应用后台研发部经费申请-雷克沙.xlsx",
+    "Documents/报销相关/2025三季度发票/25 年Q3应用后台研发部经费申请-雷克沙.xlsx",
+    "Documents/报销相关/2025四季度发票/25 年Q4应用后台研发部经费申请-雷克沙.xlsx",
+    "Documents/报销相关/2026一季度发票/26年Q1应用后台研发经费申请-雷克沙.xlsx",
+    "Documents/报销相关/2026二季度发票/26年Q2应用后台研发经费申请-雷克沙.xlsx"
+   ],
+   "acceptable": [
+    "Documents/报销相关/2024年度团建活动审批表.xlsx"
+   ],
+   "note": ""
+  },
+  {
+   "id": "D06",
+   "query": "不动产登记",
+   "type": "doc_type",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/周凯文_住房补贴相关/不动产信息查询结果单.pdf"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "D07",
+   "query": "简历",
+   "type": "doc_type",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/简历/郑昊暘的简历.pdf",
+    "Documents/doc/简历/前端开发工程师(A171029)-杨靖彤-阿尔伯塔大学.pdf.pdf",
+    "Documents/doc/简历/简历.pdf"
+   ],
+   "acceptable": [
+    "Documents/doc/简历/应届生前端面试.pdf"
+   ],
+   "note": ""
+  },
+  {
+   "id": "D08",
+   "query": "帮我找一下吃饭报销的发票",
+   "type": "doc_type",
+   "split": "holdout",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/报销相关/2025一季度发票/餐饮1.pdf",
+    "Documents/报销相关/2025一季度发票/餐饮2.pdf",
+    "Documents/报销相关/2025一季度发票/餐饮3.pdf",
+    "Documents/报销相关/2025一季度发票/餐饮4.pdf",
+    "Documents/报销相关/2025一季度发票/餐饮5.pdf",
+    "Documents/报销相关/2025一季度发票/餐饮6.pdf",
+    "Documents/报销相关/2025三季度发票/餐饮1.pdf",
+    "Documents/报销相关/2025三季度发票/餐饮2.pdf",
+    "Documents/报销相关/2025二季度发票/餐饮1.pdf",
+    "Documents/报销相关/2025二季度发票/餐饮2.pdf",
+    "Documents/报销相关/2025二季度发票/餐饮3.pdf",
+    "Documents/报销相关/2025二季度发票/餐饮4.pdf",
+    "Documents/报销相关/2025二季度发票/餐饮5.pdf",
+    "Documents/报销相关/2025二季度发票/餐饮6.pdf",
+    "Documents/报销相关/2025二季度发票/餐饮7.pdf",
+    "Documents/报销相关/2025二季度发票/餐饮8.pdf",
+    "Documents/报销相关/2025二季度发票/餐饮9.pdf",
+    "Documents/报销相关/2025四季度发票/餐饮1.pdf",
+    "Documents/报销相关/2025四季度发票/餐饮2.pdf",
+    "Documents/报销相关/2025四季度发票/餐饮3.pdf",
+    "Documents/报销相关/2025四季度发票/餐饮4.pdf",
+    "Documents/报销相关/2025四季度发票/餐饮5.pdf",
+    "Documents/报销相关/2025四季度发票/餐饮6.pdf",
+    "Documents/报销相关/2025四季度发票/餐饮7.pdf",
+    "Documents/报销相关/2025四季度发票/餐饮8.pdf",
+    "Documents/报销相关/2026一季度发票/餐饮1.pdf",
+    "Documents/报销相关/2026一季度发票/餐饮2.pdf",
+    "Documents/报销相关/2026一季度发票/餐饮3.pdf",
+    "Documents/报销相关/2026一季度发票/餐饮4.pdf",
+    "Documents/报销相关/2026一季度发票/餐饮5.pdf",
+    "Documents/报销相关/2026二季度发票/餐饮1.pdf",
+    "Documents/报销相关/2026二季度发票/餐饮2.pdf",
+    "Documents/报销相关/2026二季度发票/餐饮3.pdf",
+    "Documents/报销相关/2026二季度发票/餐饮4.pdf",
+    "Documents/报销相关/dzfp_25954000000001778508_盛世华宴（深圳）餐饮服务有限公司_20250704180219.pdf",
+    "Documents/报销相关/invoice/餐饮1.pdf",
+    "Documents/报销相关/invoice/餐饮2.pdf",
+    "Documents/报销相关/invoice/餐饮3.pdf",
+    "Documents/报销相关/invoice/餐饮4.pdf",
+    "Documents/报销相关/invoice/餐饮5.pdf",
+    "Documents/报销相关/invoice/餐饮6.pdf",
+    "Documents/报销相关/invoice/餐饮7.pdf",
+    "Documents/报销相关/四季度发票/深圳市一路腾飞餐饮管理有限公司桂湾分公司_发票金额170.00元.pdf",
+    "Documents/报销相关/四季度发票/深圳市宝安区蟹三宝蟹粉专营店_发票金额216.00元.pdf",
+    "Documents/报销相关/餐饮1.pdf",
+    "Documents/报销相关/四季度发票/",
+    "Documents/报销相关/2025四季度发票/"
+   ],
+   "acceptable": [
+    "Documents/报销相关/2025四季度发票/25 年Q4应用后台研发部经费申请-雷克沙.xlsx",
+    "Documents/报销相关/"
+   ],
+   "note": "项目主人确认：四季度发票/ 下名字是哈希值的 pdf 也都是餐饮发票"
+  },
+  {
+   "id": "D09",
+   "query": "员工费用报销打印模板",
+   "type": "doc_type",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/报销相关/2026一季度发票/员工费用报销打印模板.pdf"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "D10",
+   "query": "2024年第四季度的发票",
+   "type": "doc_type",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/报销相关/四季度发票/"
+   ],
+   "acceptable": [],
+   "note": "待确认：四季度发票/ 是不是 2024 年 Q4（文件名里有 2024 的日期）,是的"
+  },
+  {
+   "id": "T01",
+   "query": "日本签证需要的材料",
+   "type": "topic",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/日本签证材料/",
+    "Documents/doc/符娴的日本签证材料/",
+    "Documents/doc/日本单次旅游/"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "T02",
+   "query": "婚礼流程",
+   "type": "topic",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/婚礼全流程精细脚本.md",
+    "Documents/doc/婚礼宾客指南.html"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "T03",
+   "query": "ETF 长期投资策略",
+   "type": "topic",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/对话List/工程师的投资建议.txt",
+    "Documents/doc/对话List/关于美股投资的简单提问.txt",
+    "Documents/doc/对话List/应对高估值市场的投资策略 .txt",
+    "Documents/doc/对话List/与GPT关于金融，etf投资，AI泡沫的对话.txt",
+    "Documents/doc/对话List/芒格警告下的ETF投资策略.txt",
+    "Documents/doc/The Bogleheads Guide to Investing - PDF Room.pdf"
+   ],
+   "acceptable": [
+    "Documents/doc/Data_from_Claude_Suspended/projects/019dc410-26fc-7542-83de-38cd8ab8ee50.json"
+   ],
+   "note": ""
+  },
+  {
+   "id": "T04",
+   "query": "docker 部署",
+   "type": "topic",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/Nest 通关秘籍/42. 提升 Dockerfile 水平的 5 个技巧.md",
+    "Documents/doc/Nest 通关秘籍/130. 会议室预订系统：前端项目部署到阿里云.md",
+    "Documents/doc/Nest 通关秘籍/41. Nest 项目如何编写 Dockerfile.md",
+    "Documents/doc/Nest 通关秘籍/76. 为什么要使用 Docker Compose ？.md",
+    "Documents/doc/Nest 通关秘籍/40. 你的第一个 Dockerfile.md",
+    "Documents/doc/Nest 通关秘籍/129. 会议室预订系统：后端项目部署到阿里云.md",
+    "Documents/doc/Nest 通关秘籍/43. Docker 是怎么实现的？.md",
+    "Documents/doc/Nest 通关秘籍/78. Docker 支持重启策略，是否还需要 PM2.md",
+    "Documents/doc/Nest 通关秘籍/39. 通过 Desktop 学 Docker 也太简单了.md",
+    "Documents/doc/Nest 通关秘籍/77. Docker 容器通信的最简单方式：桥接网络.md",
+    "Documents/doc/个人技术文档输出/histroy策略的部署方案.md",
+    "Documents/doc/对话List/与Claude关于部署基础认知的对话.txt",
+    "Documents/doc/对话List/docker部分的实践.md",
+    "Documents/doc/对话List/与Gemini关于docker部署的沟通.md",
+    "Documents/doc/next_document/32-部署篇 7亩 静态导出.md",
+    "Documents/doc/next_document/47-实战篇 7亩 React Notes 7亩 服务器部署.md",
+    "Documents/doc/next_document/48-实战篇 7亩 React Notes 7亩 Docker 快速入门.md",
+    "Documents/doc/next_document/49-实战篇 7亩 React Notes 7亩 Docker 部署.md",
+    "Documents/doc/next_document/50-实战篇 7亩 React Notes 7亩 Vercel 部署.md"
+   ],
+   "acceptable": [
+    "Documents/doc/Nest 通关秘籍/"
+   ],
+   "note": ""
+  },
+  {
+   "id": "T05",
+   "query": "鸿蒙 NFC",
+   "type": "topic",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/Data_from_Claude_Suspended/projects/0198ca99-a5dd-75d4-a11d-58b134d42968.json",
+    "Documents/doc/Lexar软件项目提测申请单模板v1.1.xlsx"
+   ],
+   "acceptable": [
+    "Documents/doc/助记词工时.md"
+   ],
+   "note": ""
+  },
+  {
+   "id": "T06",
+   "query": "PTE DI 答题模板",
+   "type": "topic",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/PTE/BetterPTE-DI满分模板.pdf",
+    "Documents/doc/PTE/英联-口语DI方略模版 .pdf"
+   ],
+   "acceptable": [
+    "Documents/doc/PTE/"
+   ],
+   "note": ""
+  },
+  {
+   "id": "T07",
+   "query": "中美贸易和美元霸权",
+   "type": "topic",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/对话List/与Gemini关于国际贸易的相关对话.txt"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "T08",
+   "query": "去日本旅行的行程规划",
+   "type": "topic",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/Data_from_Claude_Suspended/projects/019efca0-3670-7327-9ec6-d375642f0b2b.json",
+    "Documents/doc/对话List/与Gemini的关于四国旅行的谈话.txt",
+    "Documents/doc/Data_from_Claude_Suspended/projects/53be2e5e-7540-49ab-8f80-4db52b538810.json"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "T09",
+   "query": "Nest 微服务",
+   "type": "topic",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/Nest 通关秘籍/145. 基于 gRPC 实现跨语言的微服务通信.md",
+    "Documents/doc/Nest 通关秘籍/157. 考试系统：微服务、Lib 拆分.md",
+    "Documents/doc/Nest 通关秘籍/140. Nest 如何创建微服务？.md",
+    "Documents/doc/Nest 通关秘籍/166. 考试系统：答卷微服务.md",
+    "Documents/doc/Nest 通关秘籍/144. 用 Nacos 实现微服务配置中心和注册中心.md",
+    "Documents/doc/Nest 通关秘籍/160. 考试系统：考试微服务.md",
+    "Documents/doc/Nest 通关秘籍/142. 用 Etcd 实现微服务配置中心和注册中心.md",
+    "Documents/doc/Nest 通关秘籍/169. 考试系统：分析微服务、排行榜页面.md"
+   ],
+   "acceptable": [
+    "Documents/doc/Nest 通关秘籍/"
+   ],
+   "note": ""
+  },
+  {
+   "id": "T10",
+   "query": "跑步训练计划",
+   "type": "topic",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/对话List/日常训练沟通.txt",
+    "Documents/doc/对话List/与Gemini的关于LT2的训练讨论.txt",
+    "Documents/doc/对话List/12.28半马比赛准备与预测.txt",
+    "Documents/doc/对话List/与Gemini关于状态回归与深度分析.txt",
+    "Documents/doc/Data_from_Claude_Suspended/projects/5dd27488-2553-4afc-8ad9-62af25a22bef.json",
+    "Documents/doc/对话List/12.28比赛失利.txt",
+    "Documents/doc/对话List/冬季跑步小腿酸痛解决方案 .txt"
+   ],
+   "acceptable": [],
+   "note": "项目主人确认：凡是讨论跑步训练/感受/计划的都算正确"
+  },
+  {
+   "id": "T11",
+   "query": "端侧 AI 图片助手的方案",
+   "type": "topic",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/端侧 AI 图片助手 · 竞品调研 + MVP 落地计划.md",
+    "Documents/doc/个人技术文档输出/端侧AI图片助手_方向验证提案.md"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "T12",
+   "query": "React 状态管理",
+   "type": "topic",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/react redux的最佳实践.md",
+    "Documents/doc/个人技术文档输出/useReducer和useContext 实现数据共享.md"
+   ],
+   "acceptable": [
+    "Documents/doc/个人技术文档输出/useCallback的使用.md",
+    "Documents/doc/241-ReactNative新架构实战课/02-ReactNative核心基础篇/04丨State：如何让页面“动”起来？.html"
+   ],
+   "note": ""
+  },
+  {
+   "id": "T13",
+   "query": "Next.js 缓存机制",
+   "type": "topic",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/next_document/14-缓存篇 7亩 Caching（上）.md",
+    "Documents/doc/next_document/15-缓存篇 7亩 Caching（下）.md",
+    "Documents/doc/next_document/13-数据获取篇 7亩 数据获取、缓存与重新验证.md"
+   ],
+   "acceptable": [
+    "Documents/doc/next_document/12-渲染篇 7亩 服务端渲染策略.md"
+   ],
+   "note": ""
+  },
+  {
+   "id": "T14",
+   "query": "Transformer 推理原理",
+   "type": "topic",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/Transformer推理机制_口述版.md"
+   ],
+   "acceptable": [
+    "Documents/doc/个人技术文档输出/llama.cpp 本地推理实践.md"
+   ],
+   "note": ""
+  },
+  {
+   "id": "N01",
+   "query": "半马比赛失利之后的复盘",
+   "type": "nl_question",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/对话List/12.28比赛失利.txt"
+   ],
+   "acceptable": [
+    "Documents/doc/对话List/与Gemini关于状态回归与深度分析.txt",
+    "Documents/doc/对话List/日常训练沟通.txt",
+    "Documents/doc/Data_from_Claude_Suspended/projects/5dd27488-2553-4afc-8ad9-62af25a22bef.json",
+    "Documents/doc/对话List/与Gemini的关于LT2的训练讨论.txt",
+    "Documents/doc/对话List/12.28半马比赛准备与预测.txt"
+   ],
+   "note": "项目主人确认：relevant 正确；状态回归、日常训练沟通里有部分相关内容，算 acceptable"
+  },
+  {
+   "id": "N02",
+   "query": "跑步时小腿疼怎么办",
+   "type": "nl_question",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/对话List/冬季跑步小腿酸痛解决方案 .txt"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "N03",
+   "query": "部门解散了接下来职业怎么选",
+   "type": "nl_question",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/对话List/部门解散后的职业抉择.txt",
+    "Documents/doc/对话List/部门解散后的职业抉择2.txt",
+    "Documents/doc/对话List/部门解散后的职业抉择3.txt"
+   ],
+   "acceptable": [
+    "Documents/doc/Data_from_Claude_Suspended/projects/019d6bdb-644c-7073-84e7-6c389308d52d.json",
+    "Documents/doc/Data_from_Claude_Suspended/projects/019e5cdb-f2e4-77c5-996f-a1e22a911896.json"
+   ],
+   "note": "两份 json 里包含同一段对话的副本，算可接受"
+  },
+  {
+   "id": "N04",
+   "query": "坐飞机行李托运注意事项",
+   "type": "nl_question",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/明日出行必备.md"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "N05",
+   "query": "OAuth 和 JWT 的区别",
+   "type": "nl_question",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/对话List/Oauth初步沟通.txt"
+   ],
+   "acceptable": [
+    "Documents/doc/Nest 通关秘籍/66. 两种登录状态保存方式：JWT、Session.md",
+    "Documents/doc/Nest 通关秘籍/67. Nest 里实现 Session 和 JWT.md",
+    "Documents/doc/Nest 通关秘籍/68. MySQL + TypeORM + JWT 实现登录注册.md"
+   ],
+   "note": ""
+  },
+  {
+   "id": "N06",
+   "query": "我应该怎么开始存钱",
+   "type": "nl_question",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/对话List/工程师的投资建议.txt",
+    "Documents/doc/对话List/关于美股投资的简单提问.txt"
+   ],
+   "acceptable": [
+    "Documents/doc/对话List/工程师的投资建议.txt",
+    "Documents/doc/对话List/关于美股投资的简单提问.txt",
+    "Documents/doc/对话List/应对高估值市场的投资策略 .txt",
+    "Documents/doc/对话List/与GPT关于金融，etf投资，AI泡沫的对话.txt",
+    "Documents/doc/对话List/芒格警告下的ETF投资策略.txt",
+    "Documents/doc/The Bogleheads Guide to Investing - PDF Room.pdf"
+   ],
+   "note": ""
+  },
+  {
+   "id": "N07",
+   "query": "英语听力怎么提高",
+   "type": "nl_question",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/对话List/与Claude关于B1=》B2英语学习的对话.txt",
+    "Documents/doc/对话List/day1 training with Gemini‘s talking .txt",
+    "Documents/doc/对话List/English restart with GPT.txt",
+    "Documents/doc/对话List/与Gemini关于RS训练的讨论.txt"
+   ],
+   "acceptable": [
+    "Documents/doc/Data_from_Claude_Suspended/projects/4e71c8af-6885-4ad4-8d43-d0198051d651.json",
+    "Documents/doc/PTE/"
+   ],
+   "note": ""
+  },
+  {
+   "id": "N08",
+   "query": "之前和 AI 聊过的 agent 入门",
+   "type": "nl_question",
+   "split": "holdout",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/对话List/与GPT关于Agent起步的沟通.md",
+    "Documents/doc/对话List/与ntbLM关于agent学习的对话.txt",
+    "Documents/doc/对话List/AI Agent 概念：Prompt, MCP, Skills .txt"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "N09",
+   "query": "我之前给团队做的 AI 分享稿",
+   "type": "nl_question",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/AI coding分享稿件.md",
+    "Documents/doc/个人技术文档输出/Architecting_AI_Agents.pdf",
+    "Documents/doc/个人技术文档输出/AI Agent 通识分享.md"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "N10",
+   "query": "手机网页怎么做屏幕适配",
+   "type": "nl_question",
+   "split": "holdout",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/VW 移动端响应式实现原理.md"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "N11",
+   "query": "Vue 打包上线后刷新页面 404 怎么办",
+   "type": "nl_question",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/histroy策略的部署方案.md"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "N12",
+   "query": "ip 地址和局域网是怎么回事",
+   "type": "nl_question",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/网络通信IP部分的认知.txt"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "C01",
+   "query": "how to build a high performance infinite list in react native",
+   "type": "cross_lingual",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/241-ReactNative新架构实战课/02-ReactNative核心基础篇/08丨List：如何实现高性能的无限列表？.html"
+   ],
+   "acceptable": [
+    "Documents/doc/241-ReactNative新架构实战课/02-ReactNative核心基础篇/11丨组件实战：如何实现瀑布流？.html",
+    "Documents/doc/241-ReactNative新架构实战课/02-ReactNative核心基础篇/12丨页面实战：如何搭建一个电商首页？.html"
+   ],
+   "note": ""
+  },
+  {
+   "id": "C02",
+   "query": "wedding guest guide",
+   "type": "cross_lingual",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/婚礼宾客指南.html"
+   ],
+   "acceptable": [
+    "Documents/doc/婚礼全流程精细脚本.md"
+   ],
+   "note": ""
+  },
+  {
+   "id": "C03",
+   "query": "microservices",
+   "type": "cross_lingual",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/Nest 通关秘籍/145. 基于 gRPC 实现跨语言的微服务通信.md",
+    "Documents/doc/Nest 通关秘籍/157. 考试系统：微服务、Lib 拆分.md",
+    "Documents/doc/Nest 通关秘籍/140. Nest 如何创建微服务？.md",
+    "Documents/doc/Nest 通关秘籍/166. 考试系统：答卷微服务.md",
+    "Documents/doc/Nest 通关秘籍/144. 用 Nacos 实现微服务配置中心和注册中心.md",
+    "Documents/doc/Nest 通关秘籍/160. 考试系统：考试微服务.md",
+    "Documents/doc/Nest 通关秘籍/142. 用 Etcd 实现微服务配置中心和注册中心.md",
+    "Documents/doc/Nest 通关秘籍/169. 考试系统：分析微服务、排行榜页面.md"
+   ],
+   "acceptable": [
+    "Documents/doc/Nest 通关秘籍/"
+   ],
+   "note": ""
+  },
+  {
+   "id": "C04",
+   "query": "investment advice for engineers",
+   "type": "cross_lingual",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/对话List/工程师的投资建议.txt"
+   ],
+   "acceptable": [
+    "Documents/doc/对话List/工程师的投资建议.txt",
+    "Documents/doc/对话List/关于美股投资的简单提问.txt",
+    "Documents/doc/对话List/应对高估值市场的投资策略 .txt",
+    "Documents/doc/对话List/与GPT关于金融，etf投资，AI泡沫的对话.txt",
+    "Documents/doc/对话List/芒格警告下的ETF投资策略.txt",
+    "Documents/doc/The Bogleheads Guide to Investing - PDF Room.pdf"
+   ],
+   "note": ""
+  },
+  {
+   "id": "C05",
+   "query": "dark mode for a blog",
+   "type": "cross_lingual",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/next_document/54-实战篇 7亩 博客 7亩 深色模式（Dark Mode）.md"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "E01",
+   "query": "m-flo",
+   "type": "exact_term",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/对话List/与Gemini聊关于m-flo的话题.txt",
+    "Documents/doc/Data_from_Claude_Suspended/projects/01979fb4-18c1-7631-ae1c-04b78dd3ff5f.json"
+   ],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "E02",
+   "query": "Nacos",
+   "type": "exact_term",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/Nest 通关秘籍/144. 用 Nacos 实现微服务配置中心和注册中心.md"
+   ],
+   "acceptable": [
+    "Documents/doc/Nest 通关秘籍/142. 用 Etcd 实现微服务配置中心和注册中心.md",
+    "Documents/doc/Nest 通关秘籍/156. 考试系统：技术方案和数据库设计.md",
+    "Documents/doc/Nest 通关秘籍/62. 如何动态读取不同环境的配置？.md"
+   ],
+   "note": ""
+  },
+  {
+   "id": "E03",
+   "query": "React Native 长列表性能优化",
+   "type": "exact_term",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [
+    "Documents/doc/241-ReactNative新架构实战课/02-ReactNative核心基础篇/08丨List：如何实现高性能的无限列表？.html"
+   ],
+   "acceptable": [
+    "Documents/doc/241-ReactNative新架构实战课/02-ReactNative核心基础篇/11丨组件实战：如何实现瀑布流？.html",
+    "Documents/doc/241-ReactNative新架构实战课/02-ReactNative核心基础篇/12丨页面实战：如何搭建一个电商首页？.html"
+   ],
+   "note": ""
+  },
+  {
+   "id": "E04",
+   "query": "手势冲突",
+   "type": "exact_term",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/241-ReactNative新架构实战课/03-ReactNative 社区生态篇/16丨Gesture（中）：如何解决单视图多手势的冲突问题？.html",
+    "Documents/doc/241-ReactNative新架构实战课/03-ReactNative 社区生态篇/17丨Gesture（下）：如何解决多视图多手势的冲突问题？.html"
+   ],
+   "acceptable": [
+    "Documents/doc/241-ReactNative新架构实战课/03-ReactNative 社区生态篇/15丨Gesture（上）：如何实现一个拖拽动效？.html"
+   ],
+   "note": ""
+  },
+  {
+   "id": "E05",
+   "query": "博格头",
+   "type": "exact_term",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/对话List/工程师的投资建议.txt",
+    "Documents/doc/The Bogleheads Guide to Investing - PDF Room.pdf"
+   ],
+   "acceptable": [
+    "Documents/doc/对话List/工程师的投资建议.txt",
+    "Documents/doc/对话List/关于美股投资的简单提问.txt",
+    "Documents/doc/对话List/应对高估值市场的投资策略 .txt",
+    "Documents/doc/对话List/与GPT关于金融，etf投资，AI泡沫的对话.txt",
+    "Documents/doc/对话List/芒格警告下的ETF投资策略.txt",
+    "Documents/doc/The Bogleheads Guide to Investing - PDF Room.pdf"
+   ],
+   "note": ""
+  },
+  {
+   "id": "E06",
+   "query": "useCallback",
+   "type": "exact_term",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/useCallback的使用.md"
+   ],
+   "acceptable": [
+    "Documents/doc/个人技术文档输出/react渲染原理.md"
+   ],
+   "note": ""
+  },
+  {
+   "id": "E07",
+   "query": "jsBridge",
+   "type": "exact_term",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [
+    "Documents/doc/个人技术文档输出/jsBridge总结.md"
+   ],
+   "acceptable": [
+    "Documents/doc/Data_from_Claude_Suspended/projects/0196f6a6-7335-75e5-8f6e-b1877e6e5a63.json"
+   ],
+   "note": ""
+  },
+  {
+   "id": "X01",
+   "query": "露营装备推荐",
+   "type": "negative",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "X02",
+   "query": "猫粮品牌对比",
+   "type": "negative",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "X03",
+   "query": "圣诞节礼物推荐",
+   "type": "negative",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "X04",
+   "query": "汽车维修保养记录",
+   "type": "negative",
+   "split": "holdout",
+   "status": "draft",
+   "relevant": [],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "X05",
+   "query": "宠物疫苗接种记录",
+   "type": "negative",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "X06",
+   "query": "怎么修自行车",
+   "type": "negative",
+   "split": "tune",
+   "status": "draft",
+   "relevant": [],
+   "acceptable": [],
+   "note": ""
+  },
+  {
+   "id": "X07",
+   "query": "量子计算入门",
+   "type": "negative",
+   "split": "holdout",
+   "status": "confirmed",
+   "relevant": [],
+   "acceptable": [],
+   "note": "近领域负例：语料里有 Transformer/AI 内容，但没有量子计算"
+  },
+  {
+   "id": "X08",
+   "query": "银行流水",
+   "type": "negative",
+   "split": "tune",
+   "status": "confirmed",
+   "relevant": [],
+   "acceptable": [],
+   "note": "近领域负例：语料里有发票、个税清单，但没有银行流水"
+  }
+ ]
+}
