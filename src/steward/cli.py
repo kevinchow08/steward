@@ -111,7 +111,8 @@ def run_search(query, db_path, top_k, candidate_pool_size):
             print(f"{index}. 重排序分数={result.score:.4f}")
             print(f"   文件: {result.path}")
             print(f"   chunk: {result.chunk_index}")
-            print(f"   片段: {semantic_search.compact_text(result.text)}")
+            # 提取不出文字的文件（比如扫描版 PDF）只能靠文件名命中，没有片段可以展示。
+            print(f"   片段: {semantic_search.compact_text(result.text) or '（没有可提取的文字，靠文件名命中）'}")
         # document_count 是候选池（candidate_pool_size 个）里经过重排序、
         # 通过相关度门槛的数量，不是"全语料里有多少真正相关"——粗筛阶段
         # 已经把候选面限制在了候选池大小以内，语料里可能还有没进入候选池、
@@ -128,7 +129,7 @@ def run_search(query, db_path, top_k, candidate_pool_size):
     print(f"候选池大小: {stats['candidate_pool_size']} 个 | 通过重排序: {stats['document_count']} 个 "
           f"| 比较片段(chunks): {stats['chunk_count']} 个")
     print(f"向量检索命中: {stats['dense_hit_count']} 个文档 | 关键词检索命中: {stats['sparse_hit_count']} 个文档 "
-          f"| 标签检索命中: {stats['tag_hit_count']} 个文档")
+          f"| 文件名/路径命中: {stats['path_hit_count']} 个文档 | 标签检索命中: {stats['tag_hit_count']} 个文档")
     print(f"embedding 模型加载耗时: {embed_model_load_seconds:.3f} 秒")
     print(f"重排序模型加载耗时: {rerank_model_load_seconds:.3f} 秒")
     print(f"Query 向量化: {stats['query_embed_seconds']:.3f} 秒")

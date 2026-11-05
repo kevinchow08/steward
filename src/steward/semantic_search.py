@@ -1,7 +1,8 @@
-"""基于本地 SQLite 索引执行语义搜索——向量+关键词+标签三路粗筛，
+"""基于本地 SQLite 索引执行语义搜索——向量+关键词+文件名/路径+标签四路粗筛，
 再用 cross-encoder 重排序做最终精排（先粗筛后精排，标准的两阶段 RAG 检索
 设计，见 reranker.py 的说明）。"""
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,6 +81,14 @@ DEFAULT_CANDIDATE_POOL_SIZE = 30
 # 负例也只有 5 条，这个数字还要靠留出集和后续真实查询继续验证。
 _MIN_RERANK_SCORE = -1.5
 
+# 文件名/路径这一路最多返回多少个文件。这一路只负责把"名字对得上"的文件送进候选，
+# 太多的话，低分的文件会把向量检索找到的候选挤出去。
+_PATH_SEARCH_LIMIT = 20
+
+# 查询词里至少有这么大比例能在路径上对上，才算命中。"租房合同"和"房屋租赁合同"
+# 只有"合同"对得上，比例是 1/3，所以不能定得比这更高。
+_MIN_PATH_COVERAGE = 0.3
+
 
 def search_documents(
     query,
@@ -106,7 +115,7 @@ def search_documents(
     里"隐形"——但这个主题恰恰是打标签时模型看完整篇之后才提炼出来的，标签
     检索能补上这个盲区（真实案例：一份带着"工程师思维"这个标签的文档，
     在向量+关键词两路混合检索里排到了第 2 名，第 1 名是一份没有这个标签、
-    只是话题沾边的文档）。
+    只是话题沾边的文档）。文件名/路径这一路见 _path_search() 的说明。
 
     关键词/标签这两路都是字符三元组匹配（trigram），不是真正的分词，查询词
     至少要 3 个字符才能命中——2 字短查询这两路都会搜不到东西，这是已知的
@@ -142,7 +151,11 @@ def search_documents(
         tag_ranking = _tag_search(index, query)
         tag_seconds = time.monotonic() - t3
 
-    candidates = _rrf_merge(dense_ranking, sparse_ranking, tag_ranking)[:candidate_pool_size]
+        t5 = time.monotonic()
+        path_ranking = _path_search(index, query)
+        path_seconds = time.monotonic() - t5
+
+    candidates = _rrf_merge(dense_ranking, sparse_ranking, path_ranking, tag_ranking)[:candidate_pool_size]
 
     t4 = time.monotonic()
     reranked_all = _rerank(reranker, query, candidates)  # 完整排序，还没过滤
@@ -158,12 +171,14 @@ def search_documents(
         "vector_search_seconds": dense_seconds,
         "keyword_search_seconds": sparse_seconds,
         "tag_search_seconds": tag_seconds,
+        "path_search_seconds": path_seconds,
         "chunk_count": chunk_count,
         "top1_score": reranked_all[0].score if reranked_all else None,
         "document_count": len(reranked),
         "dense_hit_count": len(dense_ranking),
         "sparse_hit_count": len(sparse_ranking),
         "tag_hit_count": len(tag_ranking),
+        "path_hit_count": len(path_ranking),
     }
 
     return results, stats
@@ -268,6 +283,72 @@ def _tag_search(index, query):
     return ranking
 
 
+def _query_tokens(query):
+    """把查询拆成用来匹配路径的词：英文和数字按整词，中文按相邻两个字。
+
+    中文不做真正的分词（不想为这个多加一个依赖），两个字一组已经够用：
+    "租房合同"拆成 租房、房合、合同，其中"合同"能对上"房屋租赁合同.pdf"。
+    "房合"这种没有意义的组合基本对不上任何文件名，只是让比例低一点，不会造成误命中。
+    """
+    query = query.lower()
+    tokens = re.findall(r"[a-z0-9][a-z0-9._-]*", query)
+    for run in re.findall(r"[\u4e00-\u9fff]+", query):
+        if len(run) == 1:
+            tokens.append(run)
+        else:
+            tokens.extend(run[i:i + 2] for i in range(len(run) - 1))
+    return list(dict.fromkeys(tokens))  # 去重，并保持原来的顺序
+
+
+def _token_in_text(token, text):
+    """英文和数字要从单词开头匹配，否则"ai"会命中"taichi"，但"agent"仍能命中"agents"。
+    中文没有单词边界，直接判断是否包含。"""
+    if token.isascii():
+        return re.search(rf"(?<![a-z0-9]){re.escape(token)}", text) is not None
+    return token in text
+
+
+def _path_search(index, query):
+    """文件名/路径检索：解决"正文里搜不到，但名字一看就是"的文件，比如提取不出文字的
+    扫描版 PDF，向量和关键词两路根本看不到它们。
+
+    打分：查询词在文件名里对上算 1 分，只在文件夹名里对上算 0.5 分，再除以总词数。
+    只看路径最后三段（跟 _rerank_input 一致），不看后缀，否则查询里的"pdf"会命中
+    所有 PDF。这个分数只用来排名，最终是否相关仍由重排序模型判断。
+
+    没有用 FTS5：现在只有两千个路径左右，每次在内存里算一遍就够快，也不用改表结构。
+    """
+    tokens = _query_tokens(query)
+    if not tokens:
+        return []
+
+    scored = []
+    for row in index.list_searchable_paths():
+        parts = Path(row["path"].lower()).parts[-3:]
+        name = Path(parts[-1]).stem
+        folders = "/".join(parts[:-1])
+        points = 0.0
+        for token in tokens:
+            if _token_in_text(token, name):
+                points += 1.0
+            elif _token_in_text(token, folders):
+                points += 0.5
+        coverage = points / len(tokens)
+        if coverage >= _MIN_PATH_COVERAGE:
+            scored.append((coverage, row))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [
+        (
+            row["document_id"],
+            # text 留空：有正文的文档也会出现在向量那一路，_rrf_merge 会优先用那边的
+            # chunk；真正留空的，只有提取不出文字的文件，重排序时只看它的路径。
+            SearchResult(path=row["path"], score=coverage, chunk_index=-1, text=""),
+        )
+        for coverage, row in scored[:_PATH_SEARCH_LIMIT]
+    ]
+
+
 def _rerank(reranker, query, candidates):
     """对 RRF 粗筛出来的候选池做精排：每个候选的"路径 + 完整 chunk"（见
     _rerank_input）跟查询一起喂给重排序模型，重排序自己给出的分数直接
@@ -322,8 +403,8 @@ def _rrf_merge(*rankings):
     展示用的片段按 rankings 参数的传入顺序决定优先级——排在前面的那一路
     如果命中了这份文档，就用它的片段展示；后面几路的 setdefault 只在前面
     都没命中这份文档时才会生效。调用方按"最想展示哪路的片段"来决定传参顺序
-    （目前是向量 > 关键词 > 标签，标签命中给的是标签原文，不是正文片段，
-    优先级放最后）。
+    （目前是向量 > 关键词 > 文件名/路径 > 标签。文件名这一路没有正文，
+    标签这一路给的是标签原文，不是正文片段，所以都排在后面）。
     """
     scores = {}
     display_result = {}

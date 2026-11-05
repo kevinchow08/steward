@@ -582,6 +582,19 @@ class DocumentIndex:
         except sqlite3.OperationalError:
             return []
 
+    def list_searchable_paths(self):
+        """返回当前存在的文档和代码文件的路径，给"文件名/路径"这一路检索用。图片和音视频
+        暂时不参与文档检索；相机原始文件（.raf 等）被归为 unknown，所以这里只列要保留的
+        类型，否则上千张照片混进来会挤掉真正的文档。"""
+        cursor = self.connection.execute(
+            """
+            SELECT id AS document_id, path
+            FROM documents
+            WHERE is_present = 1 AND basic_type IN ('document', 'code')
+            """
+        )
+        return cursor.fetchall()
+
     def _get_or_create_model(self, model_info):
         """取得模型记录；同一模型配置只保存一条。"""
 
