@@ -3,6 +3,7 @@
 设计，见 reranker.py 的说明）。"""
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -16,6 +17,9 @@ class SearchResult:
     path: str
     score: float
     chunk_index: int
+    # 完整的 chunk 正文，重排序模型靠它判断相关性。标签命中没有正文，这里放标签原文。
+    # 展示时再用 compact_text() 压成一行摘要，不要存压缩后的文本：摘要太短，
+    # 重排序模型只看摘要时经常判断不出相关性。
     text: str
 
 
@@ -39,11 +43,11 @@ _RRF_K = 60
 # 这个信号本身就不够可靠，硬卡阈值卡的位置很容易卡错，不如把"够不够相关"
 # 这个判断完全交给下面更准的重排序模型，检索阶段只管把候选面撒宽一点）。
 #
-# 80 这个数字是参考"两阶段检索：向量捞前 50~100，精排到前几个"这个业界
-# 惯用做法定的，不是精确算出来的——多捞一些，重排序的耗时会跟着线性涨
-# （每对约 100~120 毫秒，80 个大概 8~10 秒），是候选池大小和查询延迟之间
-# 的权衡，可以用 --candidates 参数调。
-DEFAULT_CANDIDATE_POOL_SIZE = 80
+# 30 是用评测集实测选的：重排序改成看完整 chunk 之后，打完 80 个候选要 8.4 秒，
+# 耗时基本跟候选数量成正比。调参集上候选从 80 降到 30，各项指标基本不变，
+# 降到 20 才开始变差（数据见 docs/retrieval_optimization_log.md）。
+# 可以用 --candidates 参数调。
+DEFAULT_CANDIDATE_POOL_SIZE = 30
 
 # 重排序模型给出的最低相关度门槛——原始分数（不是 0~1 的概率，见
 # reranker.py 里 LocalReranker.score() 为什么不用 sigmoid 的说明）低于这个
@@ -70,7 +74,11 @@ DEFAULT_CANDIDATE_POOL_SIZE = 80
 # 大幅变化，需要重新用真实查询词测一遍——这次踩的坑已经说明"边界案例
 # 只测最极端的两头是不够的"，以后调这个数字要多测几个"确实不相关但也
 # 不是特别离谱"的中间地带案例，不能只看最好和最差两个极端。
-_MIN_RERANK_SCORE = -2.5
+# 2026-11 重新校准：重排序的输入从 220 字摘要改成"路径 + 完整 chunk"之后，分数
+# 整体变了，上面这些案例的分数和旧的 -2.5 都不再适用。调参集上负例的最高分是
+# -1.88，最难的正例最高分是 -1.02，所以门槛定在两者之间。两边只差不到 1 分，
+# 负例也只有 5 条，这个数字还要靠留出集和后续真实查询继续验证。
+_MIN_RERANK_SCORE = -1.5
 
 
 def search_documents(
@@ -205,7 +213,7 @@ def _dense_search(index, model_id, query_vector, normalized):
                     path=row["path"],
                     score=score,
                     chunk_index=row["chunk_index"],
-                    text=_compact_text(row["chunk_text"]),
+                    text=row["chunk_text"],
                 ),
             )
 
@@ -231,7 +239,7 @@ def _sparse_search(index, query):
                     path=row["path"],
                     score=row["bm25_score"],
                     chunk_index=row["chunk_index"],
-                    text=_compact_text(row["chunk_text"]),
+                    text=row["chunk_text"],
                 ),
             )
 
@@ -261,9 +269,9 @@ def _tag_search(index, query):
 
 
 def _rerank(reranker, query, candidates):
-    """对 RRF 粗筛出来的候选池做精排：每个候选原来展示用的那段文本
-    （chunk 正文，或者标签命中给的标签原文）拿去跟查询一起喂给重排序
-    模型，重排序自己给出的分数直接替换掉候选原本的 RRF 分数（不再是
+    """对 RRF 粗筛出来的候选池做精排：每个候选的"路径 + 完整 chunk"（见
+    _rerank_input）跟查询一起喂给重排序模型，重排序自己给出的分数直接
+    替换掉候选原本的 RRF 分数（不再是
     "排名贡献值的累加"这种没有直接意义的数字，是重排序模型真正判断出来
     的"这俩有多相关"），按这个新分数从高到低排序。
 
@@ -275,7 +283,7 @@ def _rerank(reranker, query, candidates):
     if not candidates:
         return []
 
-    texts = [c.text for c in candidates]
+    texts = [_rerank_input(c) for c in candidates]
     scores = reranker.score(query, texts)
 
     scored = [
@@ -284,6 +292,17 @@ def _rerank(reranker, query, candidates):
     ]
     scored.sort(key=lambda r: r.score, reverse=True)
     return scored
+
+
+def _rerank_input(candidate):
+    """拼出重排序模型看到的文本：路径的最后三段 + 完整 chunk。
+
+    文件名和所在文件夹经常就是最直接的线索，比如"2025二季度发票/餐饮3.pdf"，
+    正文里反而没有"二季度"这几个字。路径放在最前面，这样正文太长被模型截断时，
+    路径也不会被截掉。只取最后三段，是因为更前面的用户主目录这些部分没有意义。
+    """
+    path_tail = "/".join(Path(candidate.path).parts[-3:])
+    return f"{path_tail}\n{candidate.text}"
 
 
 def _rrf_merge(*rankings):
@@ -327,7 +346,7 @@ def _rrf_merge(*rankings):
     return merged
 
 
-def _compact_text(text, max_chars=220):
+def compact_text(text, max_chars=220):
     """把 chunk 文本压成适合 CLI 展示的一行摘要。"""
 
     compact = " ".join(text.split())

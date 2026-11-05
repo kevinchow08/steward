@@ -83,12 +83,13 @@
    "status": "confirmed",
    "relevant": [
     "Documents/doc/日本签证材料/户主.pdf",
-    "Documents/doc/日本签证材料/首页.pdf",
+    "Documents/doc/日本签证材料/首页.pdf"
+   ],
+   "acceptable": [
     "Documents/doc/符娴的日本签证材料/本人户口.jpg",
     "Documents/doc/符娴的日本签证材料/户主户口1.jpg",
     "Documents/doc/符娴的日本签证材料/户主页2.jpg"
    ],
-   "acceptable": [],
    "note": ""
   },
   {
@@ -709,12 +710,8 @@
    "query": "我应该怎么开始存钱",
    "type": "nl_question",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
-    "Documents/doc/对话List/工程师的投资建议.txt",
-    "Documents/doc/对话List/关于美股投资的简单提问.txt"
-   ],
-   "acceptable": [
     "Documents/doc/对话List/工程师的投资建议.txt",
     "Documents/doc/对话List/关于美股投资的简单提问.txt",
     "Documents/doc/对话List/应对高估值市场的投资策略 .txt",
@@ -722,7 +719,8 @@
     "Documents/doc/对话List/芒格警告下的ETF投资策略.txt",
     "Documents/doc/The Bogleheads Guide to Investing - PDF Room.pdf"
    ],
-   "note": ""
+   "acceptable": [],
+   "note": "开放式问题，很难定义唯一答案：投资理财相关的这几份都算正确"
   },
   {
    "id": "N07",
@@ -861,11 +859,8 @@
    "query": "investment advice for engineers",
    "type": "cross_lingual",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
-    "Documents/doc/对话List/工程师的投资建议.txt"
-   ],
-   "acceptable": [
     "Documents/doc/对话List/工程师的投资建议.txt",
     "Documents/doc/对话List/关于美股投资的简单提问.txt",
     "Documents/doc/对话List/应对高估值市场的投资策略 .txt",
@@ -873,7 +868,8 @@
     "Documents/doc/对话List/芒格警告下的ETF投资策略.txt",
     "Documents/doc/The Bogleheads Guide to Investing - PDF Room.pdf"
    ],
-   "note": ""
+   "acceptable": [],
+   "note": "同 N06：投资理财相关的这几份都算正确"
   },
   {
    "id": "C05",
@@ -951,20 +947,17 @@
    "query": "博格头",
    "type": "exact_term",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
+    "Documents/doc/The Bogleheads Guide to Investing - PDF Room.pdf",
     "Documents/doc/对话List/工程师的投资建议.txt",
-    "Documents/doc/The Bogleheads Guide to Investing - PDF Room.pdf"
+    "Documents/doc/对话List/关于美股投资的简单提问.txt"
    ],
    "acceptable": [
-    "Documents/doc/对话List/工程师的投资建议.txt",
-    "Documents/doc/对话List/关于美股投资的简单提问.txt",
-    "Documents/doc/对话List/应对高估值市场的投资策略 .txt",
-    "Documents/doc/对话List/与GPT关于金融，etf投资，AI泡沫的对话.txt",
-    "Documents/doc/对话List/芒格警告下的ETF投资策略.txt",
-    "Documents/doc/The Bogleheads Guide to Investing - PDF Room.pdf"
+    "Documents/doc/Data_from_Claude_Suspended/conversations.json",
+    "Documents/doc/Data_from_Claude_Suspended/projects/019dc410-26fc-7542-83de-38cd8ab8ee50.json"
    ],
-   "note": ""
+   "note": "第 1 名应该是这本 PDF。指标只判断是否命中，这个要求要单独看名次"
   },
   {
    "id": "E06",

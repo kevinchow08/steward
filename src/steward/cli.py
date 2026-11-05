@@ -84,6 +84,9 @@ def run_search(query, db_path, top_k, candidate_pool_size):
     reranker = LocalReranker()
     rerank_model_load_seconds = time.monotonic() - t_reranker_start
 
+    if candidate_pool_size is None:
+        candidate_pool_size = semantic_search.DEFAULT_CANDIDATE_POOL_SIZE
+
     # 2. 执行语义搜索，接收结果和详细耗时/计数
     results, stats = semantic_search.search_documents(
         query,
@@ -108,7 +111,7 @@ def run_search(query, db_path, top_k, candidate_pool_size):
             print(f"{index}. 重排序分数={result.score:.4f}")
             print(f"   文件: {result.path}")
             print(f"   chunk: {result.chunk_index}")
-            print(f"   片段: {result.text}")
+            print(f"   片段: {semantic_search.compact_text(result.text)}")
         # document_count 是候选池（candidate_pool_size 个）里经过重排序、
         # 通过相关度门槛的数量，不是"全语料里有多少真正相关"——粗筛阶段
         # 已经把候选面限制在了候选池大小以内，语料里可能还有没进入候选池、
@@ -685,9 +688,11 @@ def main():
     search_parser.add_argument(
         "--candidates",
         type=int,
-        default=80,
+        # 不在这里写具体数字：默认值只放在 semantic_search.py 一个地方，
+        # 这里再写一份的话，改了那边这里容易忘（这里曾经一直写着 80）。
+        default=None,
         help=(
-            "向量+关键词+标签粗筛阶段捞出多少个候选交给重排序模型精排，默认 80。"
+            "向量+关键词+标签粗筛阶段捞出多少个候选交给重排序模型精排，默认 30。"
             "数字越大，语料里真正相关但排名靠后的内容越不容易被粗筛漏掉，但重排序"
             "耗时跟这个数字线性增长（实测约每个候选 100~120 毫秒）。"
         ),
