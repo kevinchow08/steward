@@ -125,6 +125,7 @@ def search_documents(
     （reranker.py 的 LocalReranker），查询和每个候选的实际内容做真正的
     交互式判断，用重排序自己的分数（见 _MIN_RERANK_SCORE）决定最终排序、
     以及"够不够真的相关"——不再依赖粗筛阶段任何一路的原始分数去判断相关性。
+    唯一的例外是文件名完整包含查询的文件，见 _apply_filename_rule()。
 
     返回 (results, stats) 二元组，包含命中结果列表与详细耗时/计数统计。
     """
@@ -161,7 +162,7 @@ def search_documents(
     reranked_all = _rerank(reranker, query, candidates)  # 完整排序，还没过滤
     rerank_seconds = time.monotonic() - t4
 
-    reranked = [r for r in reranked_all if r.score >= _MIN_RERANK_SCORE]
+    reranked = _apply_filename_rule(query, reranked_all)
     results = reranked[:top_k]
 
     stats = {
@@ -236,13 +237,30 @@ def _dense_search(index, model_id, query_vector, normalized):
     return [(doc_id, result) for doc_id, (_, result) in ranking], len(rows)
 
 
+def _build_fts_query(query):
+    """给查询的每个词加上双引号，让 FTS5 只把它们当成普通文字。
+
+    "m-flo" 里的 - 是 FTS5 的语法字符，不加引号会报错，这一路就被悄悄跳过了。
+    词之间用空格连接，含义是"每个词都要出现"，跟以前不加引号时一样。词里本身的双引号
+    按 FTS5 的规则写成两个。
+
+    试过把查询拆成三字一组、任意一组命中就算候选（实验 C），调参集上没有用例的名次变好，
+    R@10 反而从 0.87 降到 0.86：命中太多，无关文件把好文件挤出了前 30 个候选。
+    数据见 docs/retrieval_optimization_log.md。
+    """
+    return " ".join('"' + word.replace('"', '""') + '"' for word in query.split())
+
+
 def _sparse_search(index, query):
     """关键词检索：按文档聚合（同一文档命中多个 chunk，只保留 bm25 分数最好的
     那个），返回按 bm25 从好到坏排好序的 (document_id, SearchResult) 列表。
     bm25 越小代表匹配度越高，这里"更好"的判断是 <，跟向量那边的 > 刚好相反，
     别看错方向——真实测过验证过这个符号约定，不是凭直觉猜的。
     """
-    rows = index.search_keyword_chunks(query)
+    fts_query = _build_fts_query(query)
+    if not fts_query:
+        return []
+    rows = index.search_keyword_chunks(fts_query)
     best_by_document = {}
     for row in rows:
         doc_id = row["document_id"]
@@ -268,7 +286,10 @@ def _tag_search(index, query):
     展示用的"文本"是命中的标签原文，不是某一段正文——这份结果的价值本来
     就是"这份文档整体被打上了什么标签"，不是"文档里某一句话写了什么"。
     """
-    rows = index.search_document_tags(query)
+    fts_query = _build_fts_query(query)
+    if not fts_query:
+        return []
+    rows = index.search_document_tags(fts_query)
     ranking = []
     for row in rows:
         ranking.append((
@@ -373,6 +394,31 @@ def _rerank(reranker, query, candidates):
     ]
     scored.sort(key=lambda r: r.score, reverse=True)
     return scored
+
+
+def _filename_contains_query(query, path):
+    """文件名是否完整包含整个查询（忽略大小写和空格），比如查询"注销 Apple ID"
+    和文件名"注销Apple ID的访问代码.txt"。不看后缀。"""
+    normalized_query = "".join(query.lower().split())
+    normalized_name = "".join(Path(path).stem.lower().split())
+    return bool(normalized_query) and normalized_query in normalized_name
+
+
+def _apply_filename_rule(query, reranked_all):
+    """按门槛过滤，但文件名完整包含查询的文件不受门槛限制，并排在最前面。
+
+    真实案例：查"身份证"时，"身份证正反面.pdf"是扫描件，没有正文，重排序模型只能看到
+    路径，只给了 -3.02 分，被门槛过滤掉，第 1 名反而是一份赴日申请表。文件名包含了整个
+    查询，已经是很强的证据，不需要再靠模型判断。
+
+    Python 的排序是稳定的，所以两组文件内部仍然保持重排序的分数顺序。
+    """
+    kept = [
+        r for r in reranked_all
+        if r.score >= _MIN_RERANK_SCORE or _filename_contains_query(query, r.path)
+    ]
+    kept.sort(key=lambda r: not _filename_contains_query(query, r.path))  # False 排在 True 前面
+    return kept
 
 
 def _rerank_input(candidate):
