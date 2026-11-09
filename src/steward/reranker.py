@@ -48,7 +48,11 @@ class LocalReranker:
         model_path = Path(model_path).expanduser()
         ensure_model_downloaded(model_path, modelscope_id)
 
-        self._reranker = FlagReranker(str(model_path), use_fp16=use_fp16)
+        # batch_size：一次送进模型的候选数。FlagReranker 默认 128，30 个候选会
+        # 一次全部送进去，短文本也要补齐到最长那条的长度，白白多算很多。实测
+        # （30 个候选，M4 Pro，MPS）：128 时约 3.1 秒，8 时约 1.6 秒，4 时约 1.45 秒，
+        # 分数和 128 时完全一样，只是更快。再往下减已经没有明显收益。
+        self._reranker = FlagReranker(str(model_path), use_fp16=use_fp16, batch_size=4)
 
     def score(self, query, texts):
         """给一个查询和一批候选文本打分，返回原始分数（logit）列表，顺序

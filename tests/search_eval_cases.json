@@ -4,7 +4,8 @@
   "relevant：用户真正想找的文件，算命中、也算召回分母。acceptable：出现了不算错、也不算命中——计算指标前从结果里剔除，不占名次。",
   "status：draft = 起草者猜的标注，待项目主人确认；confirmed = 项目主人确认过。",
   "split：tune = 调参集，平时实验看它；holdout = 留出集，只在决定是否合入时跑，防止只对调参集有效。",
-  "范围：只评测文档检索。图片和 apk 暂不做，不进 relevant；同一查询下出现的图片放 acceptable。"
+  "范围：只评测文档检索。图片和 apk 暂不做，不进 relevant；同一查询下出现的图片放 acceptable。",
+  "Claude 对话导出的 JSON（Data_from_Claude_Suspended/）：很多精确文件是从它提炼出来的，所以已有更精确的文件时放 acceptable；只有它能回答时才放 relevant。"
  ],
  "cases": [
   {
@@ -161,7 +162,7 @@
    "query": "在职证明模板",
    "type": "known_item",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/日本单次旅游/日本单次电子签证在职证明模板.docx"
    ],
@@ -173,7 +174,7 @@
    "query": "llama.cpp 本地推理的笔记",
    "type": "known_item",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/个人技术文档输出/llama.cpp 本地推理实践.md"
    ],
@@ -185,7 +186,7 @@
    "query": "龙虾U盘",
    "type": "known_item",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/个人技术文档输出/小龙虾U盘业务评估.pdf",
     "Documents/doc/个人技术文档输出/忆捷Openclaw龙虾U盘使用教程.pdf"
@@ -210,7 +211,7 @@
    "query": "个人所得税纳税记录",
    "type": "doc_type",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/周凯文_住房补贴相关/个人所得税纳税清单（深圳） (1).pdf",
     "Documents/doc/周凯文_住房补贴相关/个人所得税纳税清单（深圳）.pdf"
@@ -240,7 +241,7 @@
    "query": "团建活动经费审批",
    "type": "doc_type",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/报销相关/2024年度团建活动审批表.xlsx",
     "Documents/报销相关/OP03-AD0019 江波龙集团年度团建活动经费管理办法.pdf"
@@ -271,7 +272,7 @@
    "query": "研发部经费申请表",
    "type": "doc_type",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/报销相关/24 年Q3应用后台研发部经费申请-江波龙.xlsx",
     "Documents/报销相关/2025二季度发票/25 年Q2应用后台研发部经费申请-雷克沙.xlsx",
@@ -290,7 +291,7 @@
    "query": "不动产登记",
    "type": "doc_type",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/周凯文_住房补贴相关/不动产信息查询结果单.pdf"
    ],
@@ -379,7 +380,7 @@
    "query": "员工费用报销打印模板",
    "type": "doc_type",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/报销相关/2026一季度发票/员工费用报销打印模板.pdf"
    ],
@@ -403,7 +404,7 @@
    "query": "日本签证需要的材料",
    "type": "topic",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/日本签证材料/",
     "Documents/doc/符娴的日本签证材料/",
@@ -417,7 +418,7 @@
    "query": "婚礼流程",
    "type": "topic",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/婚礼全流程精细脚本.md",
     "Documents/doc/婚礼宾客指南.html"
@@ -430,7 +431,7 @@
    "query": "ETF 长期投资策略",
    "type": "topic",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/对话List/工程师的投资建议.txt",
     "Documents/doc/对话List/关于美股投资的简单提问.txt",
@@ -449,7 +450,7 @@
    "query": "docker 部署",
    "type": "topic",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/Nest 通关秘籍/42. 提升 Dockerfile 水平的 5 个技巧.md",
     "Documents/doc/Nest 通关秘籍/130. 会议室预订系统：前端项目部署到阿里云.md",
@@ -481,13 +482,15 @@
    "query": "鸿蒙 NFC",
    "type": "topic",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
-    "Documents/doc/Data_from_Claude_Suspended/projects/0198ca99-a5dd-75d4-a11d-58b134d42968.json",
     "Documents/doc/Lexar软件项目提测申请单模板v1.1.xlsx"
    ],
    "acceptable": [
-    "Documents/doc/助记词工时.md"
+    "Documents/doc/助记词工时.md",
+    "Documents/doc/个人技术文档输出/AI Agent 通识分享.md",
+    "Documents/doc/个人技术文档输出/AI coding分享稿件.md",
+    "Documents/doc/Data_from_Claude_Suspended/projects/0198ca99-a5dd-75d4-a11d-58b134d42968.json"
    ],
    "note": ""
   },
@@ -496,7 +499,7 @@
    "query": "PTE DI 答题模板",
    "type": "topic",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/PTE/BetterPTE-DI满分模板.pdf",
     "Documents/doc/PTE/英联-口语DI方略模版 .pdf"
@@ -511,7 +514,7 @@
    "query": "中美贸易和美元霸权",
    "type": "topic",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/对话List/与Gemini关于国际贸易的相关对话.txt"
    ],
@@ -523,13 +526,14 @@
    "query": "去日本旅行的行程规划",
    "type": "topic",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
+    "Documents/doc/对话List/与Gemini的关于四国旅行的谈话.txt"
+   ],
+   "acceptable": [
     "Documents/doc/Data_from_Claude_Suspended/projects/019efca0-3670-7327-9ec6-d375642f0b2b.json",
-    "Documents/doc/对话List/与Gemini的关于四国旅行的谈话.txt",
     "Documents/doc/Data_from_Claude_Suspended/projects/53be2e5e-7540-49ab-8f80-4db52b538810.json"
    ],
-   "acceptable": [],
    "note": ""
   },
   {
@@ -564,11 +568,13 @@
     "Documents/doc/对话List/与Gemini的关于LT2的训练讨论.txt",
     "Documents/doc/对话List/12.28半马比赛准备与预测.txt",
     "Documents/doc/对话List/与Gemini关于状态回归与深度分析.txt",
-    "Documents/doc/Data_from_Claude_Suspended/projects/5dd27488-2553-4afc-8ad9-62af25a22bef.json",
     "Documents/doc/对话List/12.28比赛失利.txt",
     "Documents/doc/对话List/冬季跑步小腿酸痛解决方案 .txt"
    ],
-   "acceptable": [],
+   "acceptable": [
+    "Documents/doc/Data_from_Claude_Suspended/conversations.json",
+    "Documents/doc/Data_from_Claude_Suspended/projects/5dd27488-2553-4afc-8ad9-62af25a22bef.json"
+   ],
    "note": "项目主人确认：凡是讨论跑步训练/感受/计划的都算正确"
   },
   {
@@ -576,12 +582,14 @@
    "query": "端侧 AI 图片助手的方案",
    "type": "topic",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/个人技术文档输出/端侧 AI 图片助手 · 竞品调研 + MVP 落地计划.md",
     "Documents/doc/个人技术文档输出/端侧AI图片助手_方向验证提案.md"
    ],
-   "acceptable": [],
+   "acceptable": [
+    "Documents/doc/对话List/与Gemini关于2026年个人计划的探讨.txt"
+   ],
    "note": ""
   },
   {
@@ -589,14 +597,16 @@
    "query": "React 状态管理",
    "type": "topic",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/个人技术文档输出/react redux的最佳实践.md",
-    "Documents/doc/个人技术文档输出/useReducer和useContext 实现数据共享.md"
+    "Documents/doc/个人技术文档输出/useReducer和useContext 实现数据共享.md",
+    "Documents/doc/241-ReactNative新架构实战课/03-ReactNative 社区生态篇/19丨Redux：大型应用应该如何管理状态？.html"
    ],
    "acceptable": [
     "Documents/doc/个人技术文档输出/useCallback的使用.md",
-    "Documents/doc/241-ReactNative新架构实战课/02-ReactNative核心基础篇/04丨State：如何让页面“动”起来？.html"
+    "Documents/doc/241-ReactNative新架构实战课/02-ReactNative核心基础篇/04丨State：如何让页面“动”起来？.html",
+    "Documents/doc/241-ReactNative新架构实战课/03-ReactNative 社区生态篇/13丨生态：ReactNativeAwesome.html"
    ],
    "note": ""
   },
@@ -605,7 +615,7 @@
    "query": "Next.js 缓存机制",
    "type": "topic",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/next_document/14-缓存篇 7亩 Caching（上）.md",
     "Documents/doc/next_document/15-缓存篇 7亩 Caching（下）.md",
@@ -621,7 +631,7 @@
    "query": "Transformer 推理原理",
    "type": "topic",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/个人技术文档输出/Transformer推理机制_口述版.md"
    ],
@@ -653,7 +663,7 @@
    "query": "跑步时小腿疼怎么办",
    "type": "nl_question",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/对话List/冬季跑步小腿酸痛解决方案 .txt"
    ],
@@ -682,7 +692,7 @@
    "query": "坐飞机行李托运注意事项",
    "type": "nl_question",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/明日出行必备.md"
    ],
@@ -694,7 +704,7 @@
    "query": "OAuth 和 JWT 的区别",
    "type": "nl_question",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/对话List/Oauth初步沟通.txt"
    ],
@@ -727,7 +737,7 @@
    "query": "英语听力怎么提高",
    "type": "nl_question",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/对话List/与Claude关于B1=》B2英语学习的对话.txt",
     "Documents/doc/对话List/day1 training with Gemini‘s talking .txt",
@@ -797,7 +807,7 @@
    "query": "ip 地址和局域网是怎么回事",
    "type": "nl_question",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/个人技术文档输出/网络通信IP部分的认知.txt"
    ],
@@ -809,7 +819,7 @@
    "query": "how to build a high performance infinite list in react native",
    "type": "cross_lingual",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/241-ReactNative新架构实战课/02-ReactNative核心基础篇/08丨List：如何实现高性能的无限列表？.html"
    ],
@@ -824,7 +834,7 @@
    "query": "wedding guest guide",
    "type": "cross_lingual",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/婚礼宾客指南.html"
    ],
@@ -838,7 +848,7 @@
    "query": "microservices",
    "type": "cross_lingual",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/Nest 通关秘籍/145. 基于 gRPC 实现跨语言的微服务通信.md",
     "Documents/doc/Nest 通关秘籍/157. 考试系统：微服务、Lib 拆分.md",
@@ -876,7 +886,7 @@
    "query": "dark mode for a blog",
    "type": "cross_lingual",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/next_document/54-实战篇 7亩 博客 7亩 深色模式（Dark Mode）.md"
    ],
@@ -888,12 +898,13 @@
    "query": "m-flo",
    "type": "exact_term",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
-    "Documents/doc/对话List/与Gemini聊关于m-flo的话题.txt",
+    "Documents/doc/对话List/与Gemini聊关于m-flo的话题.txt"
+   ],
+   "acceptable": [
     "Documents/doc/Data_from_Claude_Suspended/projects/01979fb4-18c1-7631-ae1c-04b78dd3ff5f.json"
    ],
-   "acceptable": [],
    "note": ""
   },
   {
@@ -901,7 +912,7 @@
    "query": "Nacos",
    "type": "exact_term",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/Nest 通关秘籍/144. 用 Nacos 实现微服务配置中心和注册中心.md"
    ],
@@ -932,7 +943,7 @@
    "query": "手势冲突",
    "type": "exact_term",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/241-ReactNative新架构实战课/03-ReactNative 社区生态篇/16丨Gesture（中）：如何解决单视图多手势的冲突问题？.html",
     "Documents/doc/241-ReactNative新架构实战课/03-ReactNative 社区生态篇/17丨Gesture（下）：如何解决多视图多手势的冲突问题？.html"
@@ -964,7 +975,7 @@
    "query": "useCallback",
    "type": "exact_term",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/个人技术文档输出/useCallback的使用.md"
    ],
@@ -978,7 +989,7 @@
    "query": "jsBridge",
    "type": "exact_term",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [
     "Documents/doc/个人技术文档输出/jsBridge总结.md"
    ],
@@ -992,7 +1003,7 @@
    "query": "露营装备推荐",
    "type": "negative",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [],
    "acceptable": [],
    "note": ""
@@ -1002,7 +1013,7 @@
    "query": "猫粮品牌对比",
    "type": "negative",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [],
    "acceptable": [],
    "note": ""
@@ -1022,7 +1033,7 @@
    "query": "汽车维修保养记录",
    "type": "negative",
    "split": "holdout",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [],
    "acceptable": [],
    "note": ""
@@ -1042,7 +1053,7 @@
    "query": "怎么修自行车",
    "type": "negative",
    "split": "tune",
-   "status": "draft",
+   "status": "confirmed",
    "relevant": [],
    "acceptable": [],
    "note": ""
